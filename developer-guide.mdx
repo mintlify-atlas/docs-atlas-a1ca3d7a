@@ -1,0 +1,244 @@
+---
+title: 'Developer guide for building Flock from source'
+description: 'Learn how to clone, build, test, and extend Flock — the DuckDB extension for LLMs and RAG — from source on Linux, macOS, or Windows.'
+---
+
+Flock is built on top of DuckDB's extension framework using C++17. Whether you want to contribute a new provider adapter, fix a bug, or run the test suite locally, this guide covers everything you need to get from a fresh clone to a working build.
+
+## Prerequisites
+
+Before you begin, make sure the following tools are available on your system:
+
+| Tool | Version | Notes |
+|------|---------|-------|
+| CMake | 3.5+ | Required for the build system |
+| C++ compiler | Any modern | GCC, Clang, or MSVC |
+| Build system | Any | Ninja (preferred) or Make |
+| Git | Any | Required for submodule management |
+| Python 3 | 3.12+ | Optional — only needed for integration tests |
+
+<Tip>
+Ninja produces faster incremental builds than Make. Install it with `brew install ninja` on macOS or `apt-get install ninja-build` on Ubuntu/Debian.
+</Tip>
+
+## Clone and set up
+
+<Steps>
+  <Step title="Clone the repository with submodules">
+    The DuckDB engine is vendored as a Git submodule under `duckdb/`. Use `--recursive` to fetch it in one step:
+
+    ```bash
+    git clone --recursive https://github.com/dais-polymtl/flock.git
+    cd flock
+    ```
+
+    If you already cloned without `--recursive`, initialize the submodules manually:
+
+    ```bash
+    git submodule update --init --recursive
+    ```
+  </Step>
+
+  <Step title="Build and run via the interactive script">
+    The recommended way to build Flock is the interactive `build_and_run.sh` script. Run it from the repository root:
+
+    ```bash
+    ./scripts/build_and_run.sh
+    ```
+
+    The script walks you through each stage interactively:
+
+    1. **Prerequisite check** — verifies CMake, a C++ compiler, Ninja or Make, and Git are present.
+    2. **vcpkg setup** — clones and bootstraps [vcpkg](https://github.com/microsoft/vcpkg) for dependency management, then installs `libcurl` and `nlohmann_json`.
+    3. **Build configuration** — prompts you to choose Debug or Release mode and sets the appropriate CMake flags including `EXTENSION_STATIC_BUILD=1`.
+    4. **Compilation** — runs CMake configure and then builds in parallel using all available CPU cores.
+    5. **Launch DuckDB** — opens an interactive DuckDB shell with the Flock extension statically linked and ready to use.
+
+    <Note>
+    The extension is built with `EXTENSION_STATIC_BUILD=1`, meaning it is compiled directly into the DuckDB binary rather than as a separate `.duckdb_extension` file. You do not need to run `LOAD 'flock'` in the resulting DuckDB shell.
+    </Note>
+  </Step>
+</Steps>
+
+## Manual build steps
+
+If you prefer full control over the build, you can invoke CMake directly after setting up vcpkg:
+
+<CodeGroup>
+
+```bash Debug build
+mkdir -p build/debug
+cmake -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DEXTENSION_STATIC_BUILD=1 \
+  -DDUCKDB_EXTENSION_CONFIGS="$(pwd)/extension_config.cmake" \
+  -DVCPKG_BUILD=1 \
+  -DCMAKE_TOOLCHAIN_FILE="$(pwd)/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+  -DVCPKG_MANIFEST_DIR="$(pwd)" \
+  -S duckdb -B build/debug
+cmake --build build/debug --config Debug -- -j$(nproc)
+```
+
+```bash Release build
+mkdir -p build/release
+cmake -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DEXTENSION_STATIC_BUILD=1 \
+  -DDUCKDB_EXTENSION_CONFIGS="$(pwd)/extension_config.cmake" \
+  -DVCPKG_BUILD=1 \
+  -DCMAKE_TOOLCHAIN_FILE="$(pwd)/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+  -DVCPKG_MANIFEST_DIR="$(pwd)" \
+  -S duckdb -B build/release
+cmake --build build/release --config Release -- -j$(nproc)
+```
+
+</CodeGroup>
+
+The resulting DuckDB binary will be at `build/release/duckdb` (or `build/debug/duckdb`). Launch it directly — no `LOAD` statement required.
+
+## Project structure
+
+The repository is organized as follows:
+
+```text
+flock/
+├── duckdb/                        # Vendored DuckDB engine (submodule)
+├── src/
+│   ├── functions/
+│   │   ├── scalar/
+│   │   │   ├── llm_complete/      # Text generation function
+│   │   │   ├── llm_filter/        # Boolean row-level filtering
+│   │   │   ├── llm_embedding/     # Vector embedding generation
+│   │   │   ├── fusion_rrf/        # Reciprocal rank fusion
+│   │   │   ├── fusion_combsum/    # Score-based fusion (sum)
+│   │   │   ├── fusion_combmnz/    # Score-based fusion (MNZ)
+│   │   │   ├── fusion_combmed/    # Score-based fusion (median)
+│   │   │   └── fusion_combanz/    # Score-based fusion (ANZ)
+│   │   └── aggregate/
+│   │       ├── llm_reduce/        # Aggregation with an LLM prompt
+│   │       ├── llm_rerank/        # Semantic reranking of rows
+│   │       └── llm_first_or_last/ # llm_first / llm_last helpers
+│   ├── model_manager/
+│   │   ├── model.cpp              # Model resolution and dispatch
+│   │   └── providers/
+│   │       ├── adapters/          # Per-provider request builders
+│   │       │   ├── openai.cpp
+│   │       │   ├── azure.cpp
+│   │       │   ├── ollama.cpp
+│   │       │   └── anthropic.cpp
+│   │       └── handlers/          # HTTP batching and response parsing
+│   ├── prompt_manager/            # Prompt storage and versioning
+│   ├── metrics/                   # LLM observability (tokens, latency)
+│   ├── secret_manager/            # DuckDB secrets integration
+│   ├── registry/                  # Function registration with DuckDB
+│   └── include/flock/             # Public headers
+├── test/
+│   ├── unit/                      # C++ unit tests (CMake target: flock_tests)
+│   └── integration/               # Python + DuckDB integration tests
+├── scripts/
+│   ├── build_and_run.sh           # Interactive build guide
+│   ├── build_project.sh           # Non-interactive build helper
+│   ├── setup_vcpkg.sh             # vcpkg bootstrap script
+│   └── setup_env.sh               # Environment variable setup
+├── CMakeLists.txt                 # Top-level CMake configuration
+└── extension_config.cmake         # DuckDB extension registration
+```
+
+## Running tests
+
+Flock has two test suites.
+
+<Tabs>
+  <Tab title="Integration tests">
+    Integration tests use Python and the `duckdb` Python package. They require Python 3.12+ and the `pytest` and `dotenv` packages. From the repository root:
+
+    ```bash
+    cd test/integration
+    pip install -e .   # installs pytest and dotenv
+    cp .env-example .env      # fill in your API keys
+    python -m pytest src/integration/tests/
+    ```
+
+    Copy `.env-example` to `.env` and add valid API keys for the providers you want to test. Tests that require a provider not configured in `.env` will be skipped.
+  </Tab>
+  <Tab title="Unit tests">
+    C++ unit tests are registered as a CMake target and run via CTest. Build the project first, then:
+
+    ```bash
+    cmake --build build/debug --target flock_tests
+    ctest --test-dir build/debug --output-on-failure
+    ```
+
+    Unit tests cover individual components including fusion algorithms, the custom SQL parser, model manager resolution, prompt manager, and secret manager. They do not require any LLM API keys.
+  </Tab>
+</Tabs>
+
+## Coding conventions
+
+<Note>
+Read through an existing function implementation (such as `src/functions/scalar/llm_complete/`) before writing new code. Consistency with existing patterns is more important than personal preference.
+</Note>
+
+- The project uses **C++17**. Keep feature usage within that standard.
+- Follow the brace style, namespace structure, and include ordering used in surrounding files.
+- Avoid adding new third-party dependencies without a clear justification. Existing dependencies are managed via vcpkg and declared in `vcpkg.json`.
+- Submit **small, focused pull requests** with a clear description of what changes and why.
+- New LLM functions must integrate with the metrics API (`src/metrics/`) so that token usage and latency are tracked automatically.
+- Error messages should be **clear and actionable** — tell the user what went wrong and what they should do about it.
+
+## Adding a new provider
+
+Provider adapters live in `src/model_manager/providers/adapters/`. Each adapter implements the `IProvider` interface defined in `src/include/flock/model_manager/providers/provider.hpp`:
+
+```cpp
+class IProvider {
+public:
+    virtual void AddCompletionRequest(
+        const std::string& prompt,
+        const int num_output_tuples,
+        OutputType output_type,
+        const nlohmann::json& media_data) = 0;
+
+    virtual void AddEmbeddingRequest(
+        const std::vector<std::string>& inputs) = 0;
+
+    virtual void AddTranscriptionRequest(
+        const nlohmann::json& audio_files) = 0;
+};
+```
+
+To add a new provider:
+
+<Steps>
+  <Step title="Create the adapter">
+    Add `src/model_manager/providers/adapters/myprovider.cpp` and the corresponding header under `src/include/flock/model_manager/providers/adapters/`. Use one of the existing adapters (e.g., `openai.cpp`) as a template.
+  </Step>
+  <Step title="Register the provider name">
+    Add a string constant and an enum value for your provider in `src/include/flock/model_manager/repository.hpp`, then extend `GetProviderType()` to recognize the new name.
+  </Step>
+  <Step title="Wire up provider construction">
+    Update `src/model_manager/model.cpp` — specifically `ConstructProvider()` — to instantiate your new adapter when the provider name matches.
+  </Step>
+  <Step title="Add a handler if needed">
+    If your provider uses a unique HTTP batching or streaming pattern, add a handler under `src/model_manager/providers/handlers/`. Providers that follow standard REST patterns can reuse an existing handler.
+  </Step>
+  <Step title="Write tests">
+    Add unit tests under `test/unit/model_manager/` and integration tests under `test/integration/src/` for the new provider. Use the mock provider factory (`Model::SetMockProviderFactory`) to test without live API calls.
+  </Step>
+</Steps>
+
+<Warning>
+New providers must integrate with the metrics system and respect the `context_columns` abstraction. If a feature (such as audio transcription or structured output) is not supported by the provider, throw a clear error rather than silently degrading.
+</Warning>
+
+## Working on the docs
+
+The Mintlify documentation source lives in `docs/` at the repository root. To preview it locally:
+
+```bash
+cd docs
+npm install
+npm start
+```
+
+This starts a local dev server with hot reload at `http://localhost:3000`. When adding a new feature to Flock, update the corresponding documentation page alongside your code changes.

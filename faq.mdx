@@ -1,0 +1,284 @@
+---
+title: 'Frequently asked questions about Flock for DuckDB'
+description: 'Answers to common questions about Flock — supported DuckDB versions, LLM providers, installation, batch size, secrets, structured output, and more.'
+---
+
+Flock brings LLM and RAG capabilities directly into DuckDB SQL queries. If you have a question that isn't answered here, open an issue on [GitHub](https://github.com/dais-polymtl/flock) or email the team at [amine.mhedhbi@polymtl.ca](mailto:amine.mhedhbi@polymtl.ca).
+
+<AccordionGroup>
+
+  <Accordion title="What versions of DuckDB does Flock support?">
+    Flock requires **DuckDB 1.5.0 or later**. The extension is built against a vendored copy of the DuckDB engine (pinned to 1.5.0), so the community extension binary distributed through `INSTALL flock FROM community` is compiled for that version. If you are running an older DuckDB installation, upgrade it before loading Flock.
+
+    ```sql
+    -- Check your current DuckDB version
+    SELECT version();
+    ```
+  </Accordion>
+
+  <Accordion title="Which LLM providers are supported?">
+    Flock supports four providers out of the box:
+
+    | Provider | Models | Supports embeddings | Supports audio |
+    |----------|--------|---------------------|----------------|
+    | **OpenAI** | GPT-4o, GPT-4, GPT-3.5, text-embedding-* | Yes | Yes |
+    | **Azure OpenAI** | Same model family via Azure endpoints | Yes | Yes |
+    | **Ollama** | Any model served locally (LLaMA, Mistral, etc.) | Yes | No |
+    | **Anthropic** | Claude 3 family (Haiku, Sonnet, Opus) | No | No |
+
+    You can use different providers for different models within the same DuckDB session. Each model you create with `CREATE MODEL` declares its own provider.
+  </Accordion>
+
+  <Accordion title="How do I install Flock without internet access?">
+    The standard community extension installation (`INSTALL flock FROM community`) requires network access. To install without internet access, build Flock from source on a machine that has the necessary dependencies, then copy the resulting binary to your air-gapped environment.
+
+    ```bash
+    # On a machine with internet access
+    git clone --recursive https://github.com/dais-polymtl/flock.git
+    cd flock
+    ./scripts/build_and_run.sh
+    ```
+
+    The build produces a DuckDB binary with Flock statically linked at `build/release/duckdb`. Copy that binary to your air-gapped environment and run it directly — no extension loading step is required.
+
+    See the [developer guide](/developer-guide) for full build instructions.
+  </Accordion>
+
+  <Accordion title="Can I use Flock in Jupyter notebooks?">
+    Yes. Flock works with the Python DuckDB client (`duckdb` package). Install Flock once inside a notebook cell and it persists for the session:
+
+    ```python
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("INSTALL flock FROM community")
+    con.execute("LOAD flock")
+
+    result = con.execute("""
+        SELECT llm_complete(
+            {'model_name': 'default'},
+            {'prompt': 'Summarize in one sentence: DuckDB is an in-process SQL OLAP database.'}
+        )
+    """).fetchall()
+
+    print(result)
+    ```
+
+    All Flock SQL functions — `llm_complete`, `llm_filter`, `llm_embedding`, `llm_reduce`, `llm_rerank` — are accessible through the Python client just like any other SQL expression.
+  </Accordion>
+
+  <Accordion title="Does Flock work in the browser?">
+    Yes, as of v0.4.0, Flock can be compiled as a DuckDB-WASM loadable extension and run entirely in the browser without server infrastructure. The WASM build skips the `libcurl` dependency (which is unavailable in the browser sandbox) and uses the browser's native `fetch` API instead.
+
+    This makes it possible to build client-side demos, interactive notebooks, or data apps powered by Flock with zero backend setup. See the repository for details on the WASM build configuration (`-DEMSCRIPTEN=1`).
+  </Accordion>
+
+  <Accordion title="How do I handle rate limits from my LLM provider?">
+    Flock does not automatically retry rate-limited requests. When the provider returns a rate-limit error (HTTP 429), the query will fail with an error message from the provider. To reduce the likelihood of hitting rate limits:
+
+    - **Lower `batch_size`** on the model: smaller batches mean fewer concurrent requests per query.
+    - **Use a model with a higher rate limit tier** — for example, an Azure deployment often has higher per-minute token quotas than the shared OpenAI API.
+    - **Use Ollama for development** — local inference has no rate limits.
+
+    ```sql
+    -- Create a model with a conservative batch size
+    CREATE MODEL(
+        'openai_safe',
+        'gpt-4o-mini',
+        'openai',
+        {"batch_size": 5}
+    );
+    ```
+
+    For production workloads, consider processing large tables in chunks using DuckDB's `LIMIT`/`OFFSET` or by filtering with a `WHERE` clause.
+  </Accordion>
+
+  <Accordion title="What is batch_size and how does it affect performance?">
+    `batch_size` controls how many rows Flock sends to the LLM provider in a single API call. Flock formats multiple rows into a single prompt (or parallel requests, depending on the function), and `batch_size` caps how many rows are included at once.
+
+    - **Higher `batch_size`** → fewer API calls, lower latency for large tables, but higher per-request token usage and greater risk of exceeding the model's context window.
+    - **Lower `batch_size`** → more API calls, more predictable token usage per call, reduced risk of context overflow.
+
+    The default `batch_size` for system models is 10. You can override it when creating a custom model:
+
+    ```sql
+    CREATE MODEL(
+        'my_model',
+        'gpt-4o',
+        'openai',
+        {"batch_size": 20}
+    );
+    ```
+
+    If you see errors about exceeding the model's context window, reduce `batch_size`. If queries are slow on large tables and you have a high token quota, increase it.
+  </Accordion>
+
+  <Accordion title="Can I use multiple providers in the same query?">
+    Yes. You can define multiple models backed by different providers and reference them in the same query or even in the same SQL expression using a subquery.
+
+    ```sql
+    -- Create models for two different providers
+    CREATE MODEL('claude_model', 'claude-haiku-4-5', 'anthropic');
+    CREATE MODEL('local_model', 'llama3.2', 'ollama');
+
+    -- Use both in the same query
+    SELECT
+        product_name,
+        llm_complete({'model_name': 'claude_model'}, {'prompt': 'Write a tagline for: ' || product_name}) AS tagline,
+        llm_complete({'model_name': 'local_model'}, {'prompt': 'Classify this product in one word: ' || product_name}) AS category
+    FROM products;
+    ```
+
+    Each model maintains its own secrets, so you can mix OpenAI, Anthropic, Ollama, and Azure models freely in the same session.
+  </Accordion>
+
+  <Accordion title="What is the difference between llm_rerank and llm_reduce?">
+    Both are aggregate functions that operate over a group of rows, but they serve different purposes:
+
+    - **`llm_rerank`** reorders the rows in a group by semantic relevance to a query or criterion. It returns the same rows in a new order, scored by the LLM. Use it when you want the most relevant documents surfaced to the top of a result set.
+    - **`llm_reduce`** collapses multiple rows into a single output by applying an LLM prompt across the group. Use it for tasks like summarization, consensus extraction, or aggregating multiple text snippets into one answer.
+
+    ```sql
+    -- llm_rerank: aggregate that returns rows ordered by relevance (one result per group)
+    SELECT llm_rerank(
+        {'model_name': 'gpt-4o'},
+        {
+            'prompt': 'Rank by relevance to: database performance tuning',
+            'context_columns': [{'data': content}]
+        }
+    ) AS ranked_docs
+    FROM documents;
+
+    -- llm_reduce: collapses all rows into a single summary
+    SELECT llm_reduce(
+        {'model_name': 'gpt-4o'},
+        {
+            'prompt': 'Summarize all customer feedback into a single paragraph',
+            'context_columns': [{'data': feedback_text}]
+        }
+    ) AS summary
+    FROM customer_feedback;
+    ```
+  </Accordion>
+
+  <Accordion title="How does structured output work with Anthropic/Claude?">
+    Flock uses a hybrid approach for structured JSON output with Claude, automatically selected based on the model version:
+
+    - **Claude 4.x models** (e.g., `claude-sonnet-4-5`) use the native `output_format` API, which enforces schema compliance.
+    - **Claude 3.x models** (e.g., `claude-3-5-sonnet-20241022`) fall back to `tool_use` to produce structured JSON.
+
+    You do not need to configure this — Flock detects the Claude version and applies the correct method automatically. For Claude 4.x, you can pass a custom JSON schema via `model_parameters`:
+
+    ```sql
+    SELECT llm_complete(
+        {
+            'model_name': 'ClaudeModel',
+            'model_parameters': '{
+                "output_format": {
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "sentiment": {"type": "string"},
+                            "confidence": {"type": "number"}
+                        },
+                        "required": ["sentiment", "confidence"],
+                        "additionalProperties": false
+                    }
+                }
+            }'
+        },
+        {'prompt': 'Analyze the sentiment of this review.',
+         'context_columns': [{'data': review_text}]}
+    ) AS analysis
+    FROM reviews;
+    ```
+
+    <Note>
+    Anthropic does not support embedding generation (`llm_embedding`). Use OpenAI, Azure, or Ollama for embedding tasks.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Can I run Flock on Windows?">
+    Yes. Flock supports Linux, macOS, and Windows. The community extension (`INSTALL flock FROM community`) provides pre-built binaries for all three platforms.
+
+    To build from source on Windows, you need:
+    - CMake 3.5+
+    - MSVC (Visual Studio 2019 or later) or a MinGW-based GCC toolchain
+    - Ninja or MSBuild
+    - Git with submodule support
+
+    The `build_and_run.sh` script is Bash-based and requires Git Bash or WSL on Windows. Alternatively, you can run the CMake commands manually from a Developer Command Prompt.
+  </Accordion>
+
+  <Accordion title="What tuple_format options are available, and when should I use each?">
+    `tuple_format` controls how Flock serializes multiple rows into a single prompt when `batch_size > 1`. It is a model-level setting you can configure via `CREATE MODEL` or `UPDATE MODEL`.
+
+    | Format | Description | Best for |
+    |--------|-------------|----------|
+    | `JSON` | Rows serialized as a JSON array of objects | Structured data, models that handle JSON well |
+    | `XML` | Rows wrapped in XML tags (default) | General-purpose; clear row boundaries |
+    | `Markdown` | Rows rendered as a Markdown table | Readable prompts, tabular data |
+
+    If not specified, Flock defaults to `XML`. For most use cases the default works well; switch to `JSON` or `Markdown` if the model handles those formats better for your task.
+
+    ```sql
+    CREATE MODEL(
+        'my_model',
+        'gpt-4o',
+        'openai',
+        {"tuple_format": "Markdown"}
+    );
+    ```
+  </Accordion>
+
+  <Accordion title="How are API keys stored and secured?">
+    Flock uses DuckDB's built-in [secrets manager](https://duckdb.org/docs/configuration/secrets_manager) to store API keys. Secrets are never hard-coded in queries or stored in plain text in the DuckDB database file unless you explicitly persist them.
+
+    ```sql
+    -- Store an OpenAI API key as a session-scoped secret (not persisted to disk)
+    CREATE SECRET openai_key (
+        TYPE openai,
+        API_KEY 'sk-...'
+    );
+
+    -- Store a secret persistently across sessions
+    CREATE PERSISTENT SECRET openai_key (
+        TYPE openai,
+        API_KEY 'sk-...'
+    );
+    ```
+
+    Persistent secrets are stored in DuckDB's secret storage directory (typically `~/.duckdb/stored_secrets/`) with restricted file permissions. Use `DROP SECRET` to remove a key, and `FROM duckdb_secrets()` to list what is currently configured.
+
+    <Warning>
+    Avoid committing DuckDB database files that contain persistent secrets to version control. Use session-scoped secrets in scripts and CI pipelines, and inject the key value from an environment variable or secret manager.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="What is the difference between local and global models?">
+    Flock supports two scopes for models and prompts:
+
+    - **Local** (default) — the model is stored in the current database only. It is not visible when connecting to a different database.
+    - **Global** — the model is available across all databases in the session. Use `CREATE GLOBAL MODEL` to create one, or promote an existing model with `UPDATE MODEL 'name' TO GLOBAL`.
+
+    ```sql
+    -- Create a global model available to all databases
+    CREATE GLOBAL MODEL(
+        'shared-gpt4o',
+        'gpt-4o',
+        'openai',
+        {"tuple_format": "JSON", "batch_size": 16}
+    );
+
+    -- Promote an existing local model to global
+    UPDATE MODEL 'my-local-model' TO GLOBAL;
+
+    -- Demote a global model back to local
+    UPDATE MODEL 'shared-gpt4o' TO LOCAL;
+    ```
+
+    Use global models for shared configurations (e.g., a standard embedding model used by all databases). Use local models for database-specific setups or when you want to avoid interfering with other databases.
+  </Accordion>
+
+</AccordionGroup>

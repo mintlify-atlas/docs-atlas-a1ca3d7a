@@ -1,0 +1,383 @@
+---
+title: "Resource management: models, prompts, and API keys"
+description: "Manage LLM models, reusable versioned prompts, and provider API keys as SQL-native resources using Flock's built-in CREATE, GET, UPDATE, and DELETE commands."
+---
+
+Flock treats models, prompts, and API credentials as first-class SQL resources. You create and manage them with dedicated SQL commands — no config files, no environment variables to juggle across sessions. Each resource type has its own storage table that is initialized per database when Flock loads, and every resource can be scoped as either local (the current database) or global (shared across all databases in the session).
+
+<Tabs>
+  <Tab title="Models">
+    ## Model configuration
+
+    A model record maps a short `model_name` alias to the underlying provider model, its serialization format, batching behavior, and any provider-specific parameters. The fields stored for each model are:
+
+    <ParamField path="model_name" type="string" required>
+      Unique alias you use to reference this model in LLM function calls (e.g., `'gpt-4o'`).
+    </ParamField>
+
+    <ParamField path="model_type" type="string" required>
+      The underlying model identifier as the provider expects it (e.g., `'gpt-4o'`, `'llama3.1'`).
+    </ParamField>
+
+    <ParamField path="provider" type="string" required>
+      The provider that serves the model. One of `openai`, `azure`, `ollama`, or `anthropic`.
+    </ParamField>
+
+    <ParamField path="tuple_format" type="string" default="XML">
+      How input rows are serialized into the prompt. One of `JSON`, `XML`, or `Markdown`. Defaults to `XML` when not specified.
+    </ParamField>
+
+    <ParamField path="batch_size" type="integer" default="2048">
+      Maximum number of rows passed to the model in a single API call. Defaults to `2048` when not specified.
+    </ParamField>
+
+    <ParamField path="model_parameters" type="object">
+      Provider-specific parameters passed directly to the API (e.g., `temperature`, `top_p`, `n`, `frequency_penalty`). Expressed as a JSON object.
+    </ParamField>
+
+    ## Reading models
+
+    ```sql
+    -- List all available models (system-defined and user-defined)
+    GET MODELS;
+
+    -- Inspect a specific model
+    GET MODEL 'model_name';
+    ```
+
+    ## Creating models
+
+    Omitting the config object uses the defaults for `tuple_format` (`XML`) and `batch_size` (`2048`):
+
+    ```sql
+    -- Minimal: no config object
+    CREATE MODEL('my-gpt4o', 'gpt-4o', 'openai');
+
+    -- With JSON tuple format and temperature
+    CREATE MODEL(
+        'my-gpt4o',
+        'gpt-4o',
+        'openai',
+        {
+            "tuple_format": "JSON",
+            "batch_size": 8,
+            "model_parameters": {
+                "temperature": 0.2,
+                "top_p": 0.95
+            }
+        }
+    );
+
+    -- With XML tuple format
+    CREATE MODEL(
+        'my-llama',
+        'llama3.1',
+        'ollama',
+        {
+            "tuple_format": "XML",
+            "batch_size": 8,
+            "model_parameters": {
+                "n": 3,
+                "frequency_penalty": 0.1
+            }
+        }
+    );
+
+    -- With Markdown tuple format
+    CREATE MODEL(
+        'my-claude',
+        'claude-opus-4-5',
+        'anthropic',
+        {
+            "tuple_format": "Markdown",
+            "batch_size": 8
+        }
+    );
+    ```
+
+    ## Global and local models
+
+    By default, a model is local to the current database. Use `CREATE GLOBAL MODEL` to make it available across all databases:
+
+    ```sql
+    -- Global model — available in all databases
+    CREATE GLOBAL MODEL(
+        'shared-gpt4o',
+        'gpt-4o',
+        'openai',
+        {
+            "tuple_format": "JSON",
+            "batch_size": 8,
+            "model_parameters": {
+                "temperature": 0.2,
+                "top_p": 0.95
+            }
+        }
+    );
+
+    -- Local model — explicit keyword, same as the default
+    CREATE LOCAL MODEL('local-llama', 'llama3.1', 'ollama');
+
+    -- Promote or demote an existing model
+    UPDATE MODEL 'shared-gpt4o' TO LOCAL;
+    UPDATE MODEL 'local-llama' TO GLOBAL;
+    ```
+
+    ## Updating and deleting models
+
+    ```sql
+    -- Update model (same config rules as CREATE)
+    UPDATE MODEL(
+        'my-gpt4o',
+        'gpt-4o',
+        'openai',
+        {
+            "tuple_format": "JSON",
+            "batch_size": 16,
+            "model_parameters": {
+                "temperature": 0.5
+            }
+        }
+    );
+
+    -- Delete a model
+    DELETE MODEL 'my-gpt4o';
+    ```
+
+    ## Using a model in a query
+
+    Reference the model by its `model_name` alias in any Flock LLM function:
+
+    ```sql
+    SELECT llm_complete(
+        {'model_name': 'my-gpt4o'},
+        {'prompt_name': 'product-description'},
+        {'input_text': product_description}
+    ) AS generated_description
+    FROM products;
+    ```
+  </Tab>
+
+  <Tab title="Prompts">
+    ## Prompt table structure
+
+    Each prompt record stores a name, the prompt text, a version number, and a last-updated timestamp. Flock always resolves to the latest version unless you specify one explicitly.
+
+    | Field | Description |
+    | --- | --- |
+    | `prompt_name` | Unique identifier for the prompt |
+    | `prompt` | Instruction content passed to the model |
+    | `version` | Auto-incremented integer; increases on each update |
+    | `updated_at` | Timestamp of the last modification |
+
+    ## Reading prompts
+
+    ```sql
+    -- List all prompts
+    GET PROMPTS;
+
+    -- Inspect a specific prompt (returns all versions)
+    GET PROMPT 'prompt_name';
+    ```
+
+    ## Creating prompts
+
+    ```sql
+    CREATE PROMPT('product-description', 'Write a one-sentence product description for the following item.');
+    ```
+
+    ## Global and local prompts
+
+    Like models, prompts are local by default. Use `CREATE GLOBAL PROMPT` to share across databases:
+
+    ```sql
+    -- Global prompt — available in all databases
+    CREATE GLOBAL PROMPT('shared-summarizer', 'Summarize the following text in three bullet points.');
+
+    -- Local prompt — explicit keyword, same as the default
+    CREATE LOCAL PROMPT('local-classifier', 'Classify the following review as positive, negative, or neutral.');
+    CREATE PROMPT('local-classifier', 'Classify the following review as positive, negative, or neutral.');
+
+    -- Promote or demote an existing prompt
+    UPDATE PROMPT 'local-classifier' TO GLOBAL;
+    UPDATE PROMPT 'shared-summarizer' TO LOCAL;
+    ```
+
+    ## Updating and deleting prompts
+
+    Each `UPDATE PROMPT` call creates a new version while keeping the previous versions accessible by their version number:
+
+    ```sql
+    -- Update prompt text (increments version)
+    UPDATE PROMPT('product-description', 'Write a compelling two-sentence product description for the following item.');
+
+    -- Delete a prompt
+    DELETE PROMPT 'product-description';
+    ```
+
+    ## Using named prompts in queries
+
+    Reference a prompt by name in any Flock LLM function. Flock resolves to the latest version unless you specify one:
+
+    ```sql
+    -- Use the latest version of a prompt
+    SELECT llm_complete(
+        {'model_name': 'gpt-4o'},
+        {'prompt_name': 'product-description'},
+        {'input_text': product_description}
+    ) AS generated_description
+    FROM products;
+
+    -- Pin to a specific version
+    SELECT llm_complete(
+        {'model_name': 'semantic_search_model'},
+        {'prompt_name': 'customer-review-summary', 'version': 3},
+        {'customer_review': review_text}
+    ) AS review_summary
+    FROM reviews;
+    ```
+
+    <Tip>
+    Pin to a specific version in production queries to avoid prompt changes silently affecting downstream results. Use the latest-version shorthand during experimentation.
+    </Tip>
+  </Tab>
+
+  <Tab title="API keys / secrets">
+    ## How Flock stores credentials
+
+    Flock uses [DuckDB's Secrets Manager](https://duckdb.org/docs/configuration/secrets_manager.html) for all provider credentials. Secrets are typed by provider and can be temporary (in-memory, lost when the session ends) or persistent (written to disk and reloaded automatically).
+
+    Supported secret types:
+
+    | Secret type | Provider |
+    | --- | --- |
+    | `OPENAI` | OpenAI |
+    | `OLLAMA` | Ollama (self-hosted) |
+    | `AZURE_LLM` | Azure OpenAI |
+    | `ANTHROPIC` | Anthropic / Claude |
+
+    When no secret name is specified, DuckDB assigns a default name in the format `__default_<provider>` (e.g., `__default_openai`). Flock resolves this default automatically when you reference a model backed by that provider.
+
+    ## Creating secrets
+
+    <CodeGroup>
+    ```sql OpenAI
+    CREATE SECRET (
+        TYPE OPENAI,
+        API_KEY 'your-api-key'
+    );
+    -- Creates __default_openai
+    ```
+
+    ```sql Ollama
+    CREATE SECRET (
+        TYPE OLLAMA,
+        API_URL '127.0.0.1:11434'
+    );
+    -- Creates __default_ollama
+    ```
+
+    ```sql Azure OpenAI
+    CREATE SECRET (
+        TYPE AZURE_LLM,
+        API_KEY 'your-key-here',
+        RESOURCE_NAME 'resource-name',
+        API_VERSION 'api-version'
+    );
+    -- Creates __default_azure
+    ```
+
+    ```sql Anthropic
+    -- With default API version (2023-06-01)
+    CREATE SECRET (
+        TYPE ANTHROPIC,
+        API_KEY 'your-api-key'
+    );
+
+    -- With a custom API version
+    CREATE SECRET (
+        TYPE ANTHROPIC,
+        API_KEY 'your-api-key',
+        API_VERSION '2024-01-01'
+    );
+    -- Creates __default_anthropic
+    ```
+    </CodeGroup>
+
+    ## Persistent secrets
+
+    Persistent secrets survive DuckDB session restarts. Use `CREATE PERSISTENT SECRET` to write the credential to disk:
+
+    <CodeGroup>
+    ```sql OpenAI (persistent)
+    CREATE PERSISTENT SECRET (
+        TYPE OPENAI,
+        API_KEY 'your-api-key'
+    );
+    ```
+
+    ```sql Ollama (persistent)
+    CREATE PERSISTENT SECRET (
+        TYPE OLLAMA,
+        API_URL '127.0.0.1:11434'
+    );
+    ```
+
+    ```sql Azure OpenAI (persistent)
+    CREATE PERSISTENT SECRET (
+        TYPE AZURE_LLM,
+        API_KEY 'your-key-here',
+        RESOURCE_NAME 'resource-name',
+        API_VERSION 'api-version'
+    );
+    ```
+
+    ```sql Anthropic (persistent)
+    CREATE PERSISTENT SECRET (
+        TYPE ANTHROPIC,
+        API_KEY 'your-api-key'
+    );
+    ```
+    </CodeGroup>
+
+    ## Using a named secret with a model
+
+    If you have multiple secrets for the same provider (e.g., different API keys for different projects), create the secret with a custom name and reference it via `secret_name` when calling an LLM function:
+
+    ```sql
+    -- Create a named secret
+    CREATE SECRET my_project_key (
+        TYPE OPENAI,
+        API_KEY 'your-project-specific-api-key'
+    );
+
+    -- Reference it in a query
+    SELECT llm_complete(
+        {
+            'model_name': 'gpt-4o',
+            'secret_name': 'my_project_key'
+        },
+        {'prompt': 'Summarize this text.'},
+        {'text': body}
+    ) AS summary
+    FROM articles;
+    ```
+
+    ## Listing and deleting secrets
+
+    ```sql
+    -- List all secrets
+    FROM duckdb_secrets();
+
+    -- Delete a temporary secret
+    DROP TEMPORARY SECRET __default_openai;
+
+    -- Delete a persistent secret
+    DROP PERSISTENT SECRET __default_openai;
+    ```
+
+    <Warning>
+    Deleting a secret that a model depends on will cause queries using that model to fail at runtime. Make sure any model referencing a secret has an alternative credential available before dropping it.
+    </Warning>
+  </Tab>
+</Tabs>

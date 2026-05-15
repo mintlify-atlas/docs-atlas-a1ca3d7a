@@ -1,0 +1,350 @@
+---
+title: "Scalar functions: llm_complete, llm_filter, llm_embedding"
+description: "Reference for Flock's three row-level scalar functions: generate text completions, filter rows with boolean LLM evaluation, and produce vector embeddings."
+---
+
+Flock's scalar functions apply an LLM operation to each row independently, making them a natural fit for `SELECT` projections and `WHERE` clauses. Each function takes a **model configuration** struct and a **prompt configuration** struct as arguments, then returns a result for every row processed.
+
+All three functions share the same `context_columns` API for passing column data into the model. A context column entry looks like:
+
+```sql
+{'data': column_ref}                           -- basic text column
+{'data': column_ref, 'name': 'alias'}          -- text column with a named alias for prompt interpolation
+{'data': image_url_col, 'type': 'image'}       -- image column (llm_complete and llm_filter only)
+```
+
+---
+
+## llm_complete
+
+`llm_complete` calls an LLM for each row and returns the model's text response as JSON. Use it to generate, transform, or enrich text — product descriptions, summaries, translations, and more.
+
+**Return type:** `JSON`
+
+### Parameters
+
+**Model configuration** (first argument)
+
+<ParamField body="model_name" type="string" required>
+  The registered model name to use for generation.
+</ParamField>
+
+<ParamField body="secret_name" type="string">
+  The DuckDB secret holding the API key for this model. Omit when using a model that does not require authentication (e.g., a local Ollama model).
+</ParamField>
+
+**Prompt configuration** (second argument)
+
+<ParamField body="prompt" type="string">
+  An inline prompt string. Use `{alias}` placeholders to reference named context columns. Mutually exclusive with `prompt_name`.
+</ParamField>
+
+<ParamField body="prompt_name" type="string">
+  The name of a pre-configured prompt stored in Flock's prompt registry. Mutually exclusive with `prompt`.
+</ParamField>
+
+<ParamField body="version" type="integer">
+  The version of the named prompt to use. Only valid when `prompt_name` is set. Defaults to the latest version.
+</ParamField>
+
+<ParamField body="context_columns" type="array">
+  List of column references passed to the model as context. Each item must include `data` and may include `name` and `type`.
+
+  - `data` *(required)* — the SQL column expression
+  - `name` *(optional)* — alias used to reference this column in prompt placeholders
+  - `type` *(optional)* — `"tabular"` (default) or `"image"`
+</ParamField>
+
+### Examples
+
+<CodeGroup>
+
+```sql Inline prompt
+SELECT llm_complete(
+    {'model_name': 'gpt-4o'},
+    {'prompt': 'Explain the purpose of Flock.'}
+) AS flock_purpose;
+```
+
+```sql Named prompt with context
+SELECT llm_complete(
+    {'model_name': 'summarizer', 'secret_name': 'summarizer_secret'},
+    {
+        'prompt_name': 'description-generation',
+        'version': 1,
+        'context_columns': [{'data': product_name}]
+    }
+) AS product_description
+FROM UNNEST(['Wireless Headphones', 'Gaming Laptop', 'Smart Watch']) AS t(product_name);
+```
+
+```sql Multiple context columns
+SELECT
+    product_id,
+    product_name,
+    llm_complete(
+        {'model_name': 'gpt-4o'},
+        {
+            'prompt': 'Describe this product image in detail, focusing on key features and quality.',
+            'context_columns': [
+                {'data': product_name},
+                {'data': image_url, 'type': 'image'}
+            ]
+        }
+    ) AS image_analysis
+FROM VALUES
+    (1, 'Wireless Headphones', 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=400'),
+    (2, 'Gaming Laptop',       'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400'),
+    (3, 'Smart Watch',         'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400')
+AS t(product_id, product_name, image_url);
+```
+
+```sql Filter on generated output length
+WITH sample_products AS (
+    SELECT *
+    FROM (VALUES
+        (1, 'MacBook Pro',  'High-performance laptop'),
+        (2, 'AirPods Pro',  'Wireless noise-cancelling earbuds'),
+        (3, 'iPad Air',     'Lightweight tablet for creativity')
+    ) AS t(product_id, product_name, description)
+),
+enhanced_products AS (
+    SELECT product_id, product_name,
+           llm_complete(
+               {'model_name': 'reduce-model'},
+               {
+                   'prompt_name': 'summarize-content',
+                   'version': 2,
+                   'context_columns': [{'data': product_name}]
+               }
+           ) AS enhanced_description
+    FROM sample_products
+)
+SELECT product_id, product_name, enhanced_description
+FROM enhanced_products
+WHERE LENGTH(enhanced_description) > 50;
+```
+
+</CodeGroup>
+
+---
+
+## llm_filter
+
+`llm_filter` evaluates a yes/no question for each row and returns `TRUE` or `FALSE`. Place it in a `WHERE` clause to keep only the rows the model considers a match for your condition.
+
+**Return type:** `BOOLEAN`
+
+### Parameters
+
+**Model configuration** (first argument)
+
+<ParamField body="model_name" type="string" required>
+  The registered model name to use for evaluation.
+</ParamField>
+
+<ParamField body="secret_name" type="string">
+  The DuckDB secret holding the API key for this model.
+</ParamField>
+
+**Prompt configuration** (second argument)
+
+<ParamField body="prompt" type="string">
+  An inline yes/no question. Use `{alias}` placeholders to reference named context columns. Mutually exclusive with `prompt_name`.
+</ParamField>
+
+<ParamField body="prompt_name" type="string">
+  The name of a pre-configured filter prompt in Flock's prompt registry. Mutually exclusive with `prompt`.
+</ParamField>
+
+<ParamField body="version" type="integer">
+  The version of the named prompt to use. Only valid when `prompt_name` is set.
+</ParamField>
+
+<ParamField body="context_columns" type="array">
+  List of column references passed to the model as context. Each item must include `data` and may include `name` and `type`.
+
+  - `data` *(required)* — the SQL column expression
+  - `name` *(optional)* — alias used to reference this column in prompt placeholders
+  - `type` *(optional)* — `"tabular"` (default) or `"image"`
+</ParamField>
+
+### Examples
+
+<CodeGroup>
+
+```sql Inline prompt in WHERE clause
+SELECT *
+FROM VALUES
+    (1, 'Eco-friendly bamboo toothbrush made from sustainable materials'),
+    (2, 'Plastic water bottle made from recycled content'),
+    (3, 'Organic cotton t-shirt with natural dyes')
+AS t(product_id, product_description)
+WHERE llm_filter(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'Is this product description eco-friendly?',
+        'context_columns': [{'data': product_description, 'name': 'description'}]
+    }
+);
+```
+
+```sql Named prompt
+SELECT *
+FROM VALUES
+    (1, 'Solar-powered garden lights with LED technology'),
+    (2, 'Disposable plastic cups for parties'),
+    (3, 'Reusable stainless steel water bottle')
+AS t(product_id, product_description)
+WHERE llm_filter(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt_name': 'eco-friendly-check',
+        'context_columns': [{'data': product_description, 'name': 'description'}]
+    }
+);
+```
+
+```sql Combined with SQL predicates
+WITH sample_reviews AS (
+    SELECT *
+    FROM (VALUES
+        (1, 'This product exceeded my expectations! Amazing quality and fast delivery.'),
+        (2, 'Terrible experience. Product broke after one day and customer service was unhelpful.'),
+        (3, 'Good value for money. Works as expected and arrived on time.'),
+        (4, 'Outstanding! Best purchase I have made this year. Highly recommended!')
+    ) AS t(review_id, review_content)
+),
+relevant_reviews AS (
+    SELECT review_id, review_content
+    FROM sample_reviews
+    WHERE llm_filter(
+        {'model_name': 'gpt-4o'},
+        {
+            'prompt': 'Does this review content contain a positive sentiment?',
+            'context_columns': [{'data': review_content, 'name': 'content'}]
+        }
+    )
+)
+SELECT * FROM relevant_reviews
+WHERE LENGTH(review_content) > 50;
+```
+
+```sql Filter by image quality
+SELECT product_id, product_name, image_url
+FROM VALUES
+    (1, 'Premium Headphones', 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=400', 150.00),
+    (2, 'Gaming Mouse',       'https://images.unsplash.com/photo-1527814050087-3793815479db?w=400',  75.00),
+    (3, 'Wireless Keyboard',  'https://images.unsplash.com/photo-1587829741301-dc798b83add3?w=400', 120.00)
+AS t(product_id, product_name, image_url, price)
+WHERE llm_filter(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'Is this a high-quality, professional product photo with good lighting and clear visibility of the product?',
+        'context_columns': [
+            {'data': image_url, 'type': 'image'},
+            {'data': product_name}
+        ]
+    }
+)
+AND price > 50;
+```
+
+</CodeGroup>
+
+---
+
+## llm_embedding
+
+`llm_embedding` encodes one or more text columns into a dense vector that captures semantic meaning. The resulting embeddings can be compared with DuckDB's built-in `array_cosine_similarity` function for similarity search, clustering, and RAG retrieval.
+
+**Return type:** `DOUBLE[]` (a list of double-precision floats)
+
+<Note>
+  `llm_embedding` supports **text columns only**. Passing `type: 'image'` in `context_columns` is not supported and will raise an error.
+</Note>
+
+### Parameters
+
+**Model configuration** (first argument)
+
+<ParamField body="model_name" type="string" required>
+  The registered embedding model name (e.g., `text-embedding-3-small`).
+</ParamField>
+
+<ParamField body="secret_name" type="string">
+  The DuckDB secret holding the API key for this model.
+</ParamField>
+
+**Prompt configuration** (second argument)
+
+<ParamField body="context_columns" type="array" required>
+  List of text column references to embed. Multiple columns are concatenated before being sent to the model. Each item must include `data` and may include `name`.
+
+  - `data` *(required)* — the SQL column expression
+  - `name` *(optional)* — alias for this column
+</ParamField>
+
+### Examples
+
+<CodeGroup>
+
+```sql Generate embeddings
+SELECT llm_embedding(
+    {'model_name': 'text-embedding-3-small', 'secret_name': 'embedding_secret'},
+    {'context_columns': [{'data': product_name}, {'data': product_description}]}
+) AS product_embedding
+FROM VALUES
+    ('Wireless Headphones', 'Premium noise-cancelling headphones with 30-hour battery life'),
+    ('Gaming Laptop',       'High-performance laptop with RTX graphics and 16GB RAM'),
+    ('Smart Watch',         'Fitness tracker with heart rate monitor and GPS')
+AS t(product_name, product_description);
+```
+
+```sql Cosine similarity search
+WITH sample_products AS (
+    SELECT *
+    FROM (VALUES
+        (1, 'Wireless Headphones', 'Premium noise-cancelling headphones with 30-hour battery life'),
+        (2, 'Bluetooth Earbuds',   'Compact wireless earbuds with charging case'),
+        (3, 'Gaming Laptop',       'High-performance laptop with RTX graphics and 16GB RAM'),
+        (4, 'Office Laptop',       'Lightweight laptop perfect for business and productivity')
+    ) AS t(product_id, product_name, product_description)
+),
+product_embeddings AS (
+    SELECT
+        product_id,
+        product_name,
+        llm_embedding(
+            {'model_name': 'text-embedding-3-small'},
+            {'context_columns': [{'data': product_name}, {'data': product_description}]}
+        ) AS product_embedding
+    FROM sample_products
+)
+SELECT
+    a.product_name,
+    b.product_name,
+    array_cosine_similarity(
+        a.product_embedding::DOUBLE[1536],
+        b.product_embedding::DOUBLE[1536]
+    ) AS similarity
+FROM product_embeddings a
+JOIN product_embeddings b ON a.product_id != b.product_id
+WHERE similarity > 0.8;
+```
+
+</CodeGroup>
+
+### Output format
+
+The function returns a JSON array of floating-point numbers representing the embedding vector:
+
+```json
+[0.342, -0.564, 0.123, ..., 0.789]
+```
+
+Cast to a typed array before calling distance functions:
+
+```sql
+embedding_col::DOUBLE[1536]   -- for text-embedding-3-small (1536 dimensions)
+```

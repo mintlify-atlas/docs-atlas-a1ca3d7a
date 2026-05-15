@@ -1,0 +1,93 @@
+{
+  "projectType": "data-platform",
+  "projectName": "Flock",
+  "projectDescription": "A DuckDB extension that integrates LLMs and RAG pipelines directly into SQL queries for multimodal analytics.",
+  "theme": "luma",
+  "primaryColor": "#1B6FDE",
+  "lightColor": null,
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "getting-started/openai",
+              "getting-started/azure",
+              "getting-started/ollama",
+              "getting-started/anthropic"
+            ]
+          },
+          {
+            "group": "SQL Functions",
+            "pages": [
+              "functions/scalar-functions",
+              "functions/aggregate-functions",
+              "functions/hybrid-search"
+            ]
+          },
+          {
+            "group": "Multimodal",
+            "pages": [
+              "multimodal/image-support",
+              "multimodal/audio-support"
+            ]
+          },
+          {
+            "group": "Advanced Features",
+            "pages": [
+              "advanced/structured-output",
+              "advanced/llm-metrics",
+              "advanced/resource-management"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "developer-guide",
+              "faq"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Declarative SQL interface for LLM operations (text generation, classification, filtering, embeddings)",
+    "Multi-provider support: OpenAI, Azure, Ollama, and Anthropic/Claude",
+    "End-to-end RAG pipelines with hybrid search fusion functions",
+    "Multimodal analytics: text, image, and audio (transcription) support in SQL",
+    "Structured output with JSON schema enforcement across all LLM functions",
+    "Built-in LLM observability: token usage, API latency, and call metrics via flock_get_metrics()",
+    "Resource management for models and prompts as first-class SQL objects",
+    "Browser and WASM support via DuckDB-WASM"
+  ],
+  "publicApiSurface": [
+    "llm_complete(model_config, prompt_config, context_columns) → VARCHAR",
+    "llm_filter(model_config, prompt_config) → BOOLEAN",
+    "llm_embedding(model_config, prompt_config) → FLOAT[]",
+    "llm_reduce(model_config, prompt_config, context_columns) → VARCHAR",
+    "llm_rerank(model_config, prompt_config, context_columns) → DOUBLE",
+    "llm_first(model_config, prompt_config, context_columns) → VARCHAR",
+    "llm_last(model_config, prompt_config, context_columns) → VARCHAR",
+    "fusion_rrf(rank1, rank2, ...) → DOUBLE",
+    "fusion_combsum(score1, score2, ...) → DOUBLE",
+    "fusion_combmnz(score1, score2, ...) → DOUBLE",
+    "fusion_combmed(score1, score2, ...) → DOUBLE",
+    "fusion_combanz(score1, score2, ...) → DOUBLE",
+    "flock_get_metrics() → JSON",
+    "flock_get_debug_metrics() → JSON",
+    "flock_reset_metrics() → VARCHAR",
+    "CREATE MODEL(name, type, provider, config)",
+    "CREATE PROMPT(name, content, version)",
+    "GET MODELS",
+    "GET MODEL 'name'",
+    "DELETE MODEL 'name'",
+    "INSTALL flock FROM community",
+    "LOAD flock"
+  ]
+}

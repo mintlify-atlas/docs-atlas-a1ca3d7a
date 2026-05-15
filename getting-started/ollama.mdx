@@ -1,0 +1,139 @@
+---
+title: "Configure Flock with Ollama for local model execution"
+description: "Run LLM queries entirely locally using Ollama with Flock. No API key required — just point Flock at your local Ollama instance and start querying."
+---
+
+Ollama lets you run open-weight models locally without any external API calls or API keys. Flock connects to your local Ollama instance over HTTP, so queries stay entirely on your machine. This makes Ollama a good choice for development, offline use, or privacy-sensitive workloads. Both text completion and vision models are supported.
+
+## Prerequisites
+
+Before configuring Flock, you need Ollama installed and running with at least one model downloaded:
+
+1. **Install Ollama** — download from [ollama.com/download](https://ollama.com/download)
+2. **Pull a model** — for example: `ollama pull llama3.2`
+3. **Confirm Ollama is running** — the default address is `127.0.0.1:11434`
+
+Make sure Flock is installed and loaded before continuing — see the [Quickstart](/quickstart) if you haven't done that yet.
+
+## Configure your secret
+
+Ollama does not require an API key. You only need to tell Flock where Ollama is listening:
+
+```sql
+CREATE SECRET (
+    TYPE ollama,
+    API_URL '127.0.0.1:11434'
+);
+```
+
+The `API_URL` field is required and must point to your running Ollama instance. If you're running Ollama on a different host or port, update the URL accordingly.
+
+<Tip>
+  If you change the Ollama port with the `OLLAMA_HOST` environment variable, update `API_URL` here to match.
+</Tip>
+
+## Create a model
+
+Register a named model in Flock using the exact model name you pulled with Ollama:
+
+```sql
+CREATE MODEL(
+    'QuackingModel',
+    'llama3.2',
+    'ollama',
+    {"tuple_format": "json", "batch_size": 32, "model_parameters": {"temperature": 0.7}}
+);
+```
+
+The four arguments are:
+
+| Argument | Description |
+|---|---|
+| `'QuackingModel'` | Unique name you reference in queries |
+| `'llama3.2'` | Ollama model name (must be already pulled) |
+| `'ollama'` | Provider name |
+| `{...}` | Config: batch size, tuple format, and model parameters |
+
+<Warning>
+  The model name must exactly match what you pulled with `ollama pull`. Run `ollama list` to see all downloaded models on your system.
+</Warning>
+
+## Run a query
+
+With your secret and model in place, call `llm_complete`:
+
+```sql
+SELECT llm_complete(
+    {'model_name': 'QuackingModel'},
+    {'prompt': 'Write a short poem about a database.'}
+);
+```
+
+To use column data as context:
+
+```sql
+SELECT llm_complete(
+    {'model_name': 'QuackingModel'},
+    {
+        'prompt': 'Classify the topic of this article: {article}',
+        'context_columns': [{'data': article_text, 'name': 'article'}]
+    }
+) AS topic
+FROM articles;
+```
+
+## Supported model types
+
+<Tabs>
+  <Tab title="Text models">
+    Any Ollama text/chat model works with `llm_complete`, `llm_filter`, and aggregate functions. Popular choices include:
+
+    | Model | Pull command |
+    |---|---|
+    | Llama 3.2 (3B) | `ollama pull llama3.2` |
+    | Llama 3.1 (8B) | `ollama pull llama3.1` |
+    | Mistral 7B | `ollama pull mistral` |
+    | Gemma 2 (9B) | `ollama pull gemma2` |
+    | Phi-3 Mini | `ollama pull phi3` |
+
+    See the full catalog at [ollama.com/library](https://ollama.com/library).
+  </Tab>
+  <Tab title="Vision models">
+    Ollama vision models can analyze images passed via `context_columns`. Pull a vision-capable model first:
+
+    ```bash
+    ollama pull llava
+    ```
+
+    Then use it in a query:
+
+    ```sql
+    CREATE MODEL(
+        'VisionModel',
+        'llava',
+        'ollama',
+        {"tuple_format": "json", "batch_size": 4}
+    );
+
+    SELECT llm_complete(
+        {'model_name': 'VisionModel'},
+        {
+            'prompt': 'Describe what is shown in this image.',
+            'context_columns': [{'data': image_column, 'type': 'image'}]
+        }
+    ) AS description
+    FROM images_table;
+    ```
+  </Tab>
+</Tabs>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Image support" icon="image" href="/multimodal/image-support">
+    Analyze images with vision models in SQL queries
+  </Card>
+  <Card title="Scalar functions" icon="function" href="/functions/scalar-functions">
+    Full reference for llm_complete, llm_filter, llm_embedding, and more
+  </Card>
+</CardGroup>

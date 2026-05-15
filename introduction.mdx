@@ -1,0 +1,100 @@
+---
+title: "Flock: LLMs and RAG natively in DuckDB SQL"
+description: "Flock is a DuckDB extension that brings LLM functions, RAG pipelines, and multimodal analytics directly into SQL queries. No extra infrastructure needed."
+---
+
+Flock extends DuckDB with a suite of declarative SQL functions for LLM-powered analytics. Run text generation, classification, embedding, filtering, and hybrid search — all from standard SQL — against OpenAI, Azure, Ollama, or Anthropic/Claude. Flock also supports images and audio as first-class data types in your queries.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install Flock and run your first LLM query in under 5 minutes
+  </Card>
+  <Card title="SQL Functions" icon="function" href="/functions/scalar-functions">
+    Explore llm_complete, llm_filter, llm_embedding, and more
+  </Card>
+  <Card title="Hybrid Search & RAG" icon="magnifying-glass" href="/functions/hybrid-search">
+    Build end-to-end RAG pipelines with fusion scoring functions
+  </Card>
+  <Card title="Multimodal Support" icon="image" href="/multimodal/image-support">
+    Analyze images and transcribe audio directly in SQL queries
+  </Card>
+</CardGroup>
+
+## What you can do with Flock
+
+Flock makes it possible to call LLMs as part of any SQL query — using the same `SELECT`, `WHERE`, and `GROUP BY` patterns you already know.
+
+```sql
+-- Generate product descriptions for every row in a table
+SELECT llm_complete(
+    {'model_name': 'gpt-4o'},
+    {'prompt': 'Write a one-sentence product description for {name}.', 
+     'context_columns': [{'data': product_name, 'name': 'name'}]}
+) AS description
+FROM products;
+```
+
+```sql
+-- Filter rows based on LLM evaluation
+SELECT *
+FROM customer_reviews
+WHERE llm_filter(
+    {'model_name': 'gpt-4o'},
+    {'prompt': 'Is this review mentioning a shipping issue?',
+     'context_columns': [{'data': review_text}]}
+);
+```
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Four LLM providers" icon="plug">
+    OpenAI, Azure OpenAI, Ollama, and Anthropic/Claude — all through the same SQL API
+  </Card>
+  <Card title="Aggregate functions" icon="layer-group">
+    Reduce, rerank, and rank groups of rows using LLMs as GROUP BY aggregates
+  </Card>
+  <Card title="Structured output" icon="brackets-curly">
+    Enforce JSON schemas on LLM responses for reliable downstream processing
+  </Card>
+  <Card title="LLM observability" icon="chart-bar">
+    Track token usage, API latency, and call counts with flock_get_metrics()
+  </Card>
+  <Card title="Hybrid search" icon="sliders">
+    Combine BM25 and vector scores using RRF, CombSUM, CombMNZ, and more
+  </Card>
+  <Card title="Browser & WASM" icon="globe">
+    Run Flock-powered workloads in the browser via DuckDB-WASM
+  </Card>
+</CardGroup>
+
+## Getting started
+
+<Steps>
+  <Step title="Install DuckDB">
+    Download DuckDB v1.5.0 or later from [duckdb.org/docs/installation](https://duckdb.org/docs/installation/).
+  </Step>
+  <Step title="Install and load Flock">
+    ```sql
+    INSTALL flock FROM community;
+    LOAD flock;
+    ```
+  </Step>
+  <Step title="Configure your provider">
+    Set up API credentials for your chosen provider — [OpenAI](/getting-started/openai), [Azure](/getting-started/azure), [Ollama](/getting-started/ollama), or [Anthropic](/getting-started/anthropic).
+  </Step>
+  <Step title="Run your first query">
+    ```sql
+    SELECT llm_complete(
+        {'model_name': 'gpt-4o'},
+        {'prompt': 'Summarize this in one sentence.',
+         'context_columns': [{'data': text_column}]}
+    ) AS summary
+    FROM my_table;
+    ```
+  </Step>
+</Steps>
+
+## About the project
+
+Flock is developed by the [Data & AI Systems Laboratory (DAIS Lab)](https://github.com/dais-polymtl) at Polytechnique Montréal. It is the subject of the VLDB 2025 demo paper *Beyond Quacking: Deep Integration of Language Models and RAG into DuckDB*. The project is MIT-licensed and available as a DuckDB community extension.

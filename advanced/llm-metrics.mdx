@@ -1,0 +1,161 @@
+---
+title: "LLM metrics: token usage and latency observability"
+description: "Track token consumption, API latency, and execution time per function, model, and provider using three built-in SQL functions — no external tooling required."
+---
+
+Flock collects observability data for every LLM call at the database level. You can inspect token usage, API round-trip latency, and total execution time broken down by function, model, and provider — all from SQL, without any external monitoring infrastructure. Metrics are aggregated across both scalar and aggregate function calls, so a single `flock_get_metrics()` query gives you a complete picture of what a workload consumed.
+
+## Core functions
+
+Flock registers three scalar functions for metrics access:
+
+<CardGroup cols={3}>
+  <Card title="flock_get_metrics()" icon="chart-bar">
+    Returns a compact JSON summary of LLM usage since the last reset.
+  </Card>
+  <Card title="flock_get_debug_metrics()" icon="bug">
+    Returns a more verbose JSON payload useful for diagnosing unexpected behavior.
+  </Card>
+  <Card title="flock_reset_metrics()" icon="arrow-rotate-left">
+    Clears the in-memory metrics state and returns a confirmation string.
+  </Card>
+</CardGroup>
+
+All three functions take no arguments and are database-scoped — metrics accumulate for the lifetime of the connection unless explicitly reset.
+
+## Metrics JSON structure
+
+`flock_get_metrics()` returns a JSON object with a single `invocations` array. Each element represents one function/model combination that was called:
+
+```json
+{
+  "invocations": [
+    {
+      "function": "llm_complete",
+      "model_name": "gpt-4o",
+      "provider": "openai",
+      "input_tokens": 1234,
+      "output_tokens": 456,
+      "api_calls": 10,
+      "api_duration_us": 1234567,
+      "execution_time_us": 2345678
+    }
+  ]
+}
+```
+
+<ResponseField name="function" type="string">
+  The Flock function that produced this entry. One of `llm_complete`, `llm_filter`, `llm_embedding`, `llm_reduce`, `llm_rerank`, `llm_first`, or `llm_last`.
+</ResponseField>
+
+<ResponseField name="model_name" type="string">
+  The model name as configured in Flock (e.g., `gpt-4o`, `llama3.1`). This is the `model_name` key you pass to the function, not the underlying model identifier.
+</ResponseField>
+
+<ResponseField name="provider" type="string">
+  The provider that served the calls. One of `openai`, `azure`, `ollama`, or `anthropic`.
+</ResponseField>
+
+<ResponseField name="input_tokens" type="integer">
+  Total prompt tokens consumed across all calls in this invocation group.
+</ResponseField>
+
+<ResponseField name="output_tokens" type="integer">
+  Total completion tokens generated across all calls in this invocation group.
+</ResponseField>
+
+<ResponseField name="api_calls" type="integer">
+  Number of HTTP requests sent to the provider API. This can exceed the row count when batching is in effect.
+</ResponseField>
+
+<ResponseField name="api_duration_us" type="integer">
+  Cumulative time spent waiting for the provider API to respond, in microseconds. Divide by 1,000 for milliseconds.
+</ResponseField>
+
+<ResponseField name="execution_time_us" type="integer">
+  Total wall-clock time for the function invocation including serialization, batching, and deserialization, in microseconds. This is always ≥ `api_duration_us`.
+</ResponseField>
+
+## Basic workflow
+
+The standard pattern is: reset, run, inspect.
+
+<Steps>
+  <Step title="Reset metrics">
+    Clear any accumulated state from previous queries so your measurements are isolated.
+
+    ```sql
+    SELECT flock_reset_metrics();
+    ```
+  </Step>
+
+  <Step title="Run your workload">
+    Execute the LLM query you want to measure.
+
+    ```sql
+    SELECT llm_complete(
+      {'model_name': 'gpt-4o'},
+      {'prompt': 'Summarize this product.'},
+      {'product': product_name}
+    )
+    FROM products
+    LIMIT 10;
+    ```
+  </Step>
+
+  <Step title="Inspect metrics">
+    Retrieve the aggregated metrics for the workload.
+
+    ```sql
+    SELECT flock_get_metrics() AS metrics;
+    ```
+  </Step>
+</Steps>
+
+## Query-level workflow example
+
+Because metrics are stored at the database level, you can reset, run, and inspect in a single script:
+
+```sql
+-- 1) Clear previous metrics
+SELECT flock_reset_metrics();
+
+-- 2) Run workload
+WITH sample AS (
+    SELECT *
+    FROM (VALUES
+        (1, 'Wireless Headphones'),
+        (2, 'Gaming Laptop'),
+        (3, 'Smart Watch')
+    ) AS t(product_id, product_name)
+)
+SELECT
+    product_id,
+    llm_complete(
+        {'model_name': 'gpt-4o'},
+        {'prompt': 'Write a short marketing blurb for {name}.', 'context_columns': [{'data': product_name, 'name': 'name'}]}
+    ) AS copy
+FROM sample;
+
+-- 3) Inspect metrics
+SELECT flock_get_metrics() AS metrics;
+```
+
+You can parse the returned JSON further using DuckDB's JSON extension to build dashboards, cost reports, or automated alerting queries.
+
+## When to use metrics
+
+<CardGroup cols={2}>
+  <Card title="Benchmarking" icon="gauge">
+    Compare latency and token counts across providers or models running the same prompt to pick the most cost-effective option.
+  </Card>
+  <Card title="Cost monitoring" icon="dollar-sign">
+    Track cumulative token usage across workloads to stay within API quotas and budget limits.
+  </Card>
+  <Card title="Prompt optimization" icon="sliders">
+    Measure how prompt rewrites affect input token counts and API latency before rolling changes to production.
+  </Card>
+  <Card title="Query diagnosis" icon="magnifying-glass">
+    Use `flock_get_debug_metrics()` to identify which specific calls inside a complex query are slow or unexpectedly expensive.
+  </Card>
+</CardGroup>

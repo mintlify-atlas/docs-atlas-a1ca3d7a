@@ -1,0 +1,126 @@
+---
+title: "Configure Flock with OpenAI or an OpenAI-compatible API"
+description: "Set up an OpenAI API key in DuckDB, register a model, and run your first llm_complete query against GPT-4o or any OpenAI-compatible endpoint."
+---
+
+Flock supports OpenAI as a first-class provider. Once you store your API key with `CREATE SECRET`, every Flock function — `llm_complete`, `llm_filter`, `llm_embedding`, and the rest — can use any OpenAI model. Flock also supports any OpenAI-compatible API (such as Groq or a self-hosted vLLM server) by supplying a custom `BASE_URL`.
+
+## Prerequisites
+
+You need an OpenAI API key. Create one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). Make sure Flock is installed and loaded before continuing — see the [Quickstart](/quickstart) if you haven't done that yet.
+
+## Configure your secret
+
+Store your API key using DuckDB's `CREATE SECRET` command with the `openai` type:
+
+```sql
+CREATE SECRET (
+    TYPE openai,
+    API_KEY 'your-api-key'
+);
+```
+
+The `API_KEY` field is required. Flock will raise an error if it is missing or empty.
+
+<Tip>
+  DuckDB's secret manager redacts `api_key` values in all output — you can safely inspect secrets with `FROM duckdb_secrets()` without exposing your key.
+</Tip>
+
+## Create a model
+
+Register a named model that references the provider and model ID you want to use:
+
+```sql
+CREATE MODEL(
+    'QuackingModel',
+    'gpt-4o',
+    'openai',
+    {"tuple_format": "json", "batch_size": 32, "model_parameters": {"temperature": 0.7}}
+);
+```
+
+The four arguments are:
+
+| Argument | Description |
+|---|---|
+| `'QuackingModel'` | Unique name you reference in queries |
+| `'gpt-4o'` | OpenAI model ID |
+| `'openai'` | Provider name |
+| `{...}` | Config: batch size, tuple format, and model parameters |
+
+## Run a query
+
+With your secret and model in place, call `llm_complete`:
+
+```sql
+SELECT llm_complete(
+    {'model_name': 'QuackingModel'},
+    {'prompt': 'Write a short poem about a database.'}
+);
+```
+
+To incorporate table columns as context:
+
+```sql
+SELECT llm_complete(
+    {'model_name': 'QuackingModel'},
+    {
+        'prompt': 'Classify the sentiment of this review: {review}',
+        'context_columns': [{'data': review_text, 'name': 'review'}]
+    }
+) AS sentiment
+FROM customer_reviews;
+```
+
+## Available OpenAI models
+
+The table below lists commonly used models. For the full and up-to-date list, see the [OpenAI models documentation](https://platform.openai.com/docs/models).
+
+| Model ID | Type | Notes |
+|---|---|---|
+| `gpt-4o` | Chat completion | Best overall performance |
+| `gpt-4o-mini` | Chat completion | Fast and cost-effective |
+| `gpt-4-turbo` | Chat completion | Previous flagship model |
+| `text-embedding-3-small` | Embedding | Recommended for most embedding tasks |
+| `text-embedding-3-large` | Embedding | Higher-dimensional embeddings |
+| `text-embedding-ada-002` | Embedding | Legacy embedding model |
+
+<Note>
+  Use embedding models with `llm_embedding` and chat models with `llm_complete`, `llm_filter`, and aggregate functions.
+</Note>
+
+## OpenAI-compatible providers
+
+Any provider with an OpenAI-compatible API works with the `openai` secret type — just add a `BASE_URL`. The example below configures [Groq](https://groq.com/):
+
+```sql
+CREATE SECRET (
+    TYPE openai,
+    BASE_URL 'https://api.groq.com/openai/v1/',
+    API_KEY 'your-groq-api-key'
+);
+```
+
+Then create a model using the provider's model ID:
+
+```sql
+CREATE MODEL(
+    'GroqModel',
+    'llama3-8b-8192',
+    'openai',
+    {"tuple_format": "json", "batch_size": 32}
+);
+```
+
+The rest of the workflow is identical to native OpenAI.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Structured output" icon="brackets-curly" href="/advanced/structured-output">
+    Enforce JSON schemas on llm_complete responses
+  </Card>
+  <Card title="Scalar functions" icon="function" href="/functions/scalar-functions">
+    Full reference for llm_complete, llm_filter, llm_embedding, and more
+  </Card>
+</CardGroup>

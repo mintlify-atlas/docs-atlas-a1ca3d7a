@@ -1,0 +1,229 @@
+---
+title: "Audio transcription in Flock SQL queries"
+description: "Transcribe audio files inside DuckDB SQL using OpenAI Whisper or Azure. Chain transcripts into llm_complete, llm_filter, and llm_embedding for analytics."
+---
+
+Flock can transcribe audio files directly inside a SQL query and return the resulting text as a column. You can join transcripts with structured data, filter rows based on what was said, summarize calls, or generate embeddings for similarity search — all in standard DuckDB SQL.
+
+## Supported providers
+
+<Warning>
+  Audio transcription is only available for **OpenAI** and **Azure OpenAI**. Calling any audio workflow with Anthropic/Claude or Ollama will raise an error at runtime.
+
+  - **Anthropic/Claude** — not supported
+  - **Ollama** — not supported
+</Warning>
+
+Supported providers and their transcription endpoints:
+
+| Provider      | Transcription endpoint             | Example model |
+|---------------|------------------------------------|---------------|
+| OpenAI        | `audio/transcriptions`             | `whisper-1`   |
+| Azure OpenAI  | Azure audio transcription endpoint | `whisper-1`   |
+
+See the getting-started guides for API key setup: [OpenAI](/getting-started/openai), [Azure](/getting-started/azure).
+
+## Using audio in context_columns
+
+To transcribe audio, add an entry with `type: 'audio'` and a `transcription_model` to the `context_columns` array:
+
+```sql
+'context_columns': [
+  {
+    'data': file_path,
+    'type': 'audio',
+    'transcription_model': 'whisper-1'
+  }
+]
+```
+
+Flock transcribes the audio before sending the resulting text to the completion model, so the prompt sees plain text — not raw audio bytes.
+
+### Audio context column properties
+
+<ParamField path="data" type="column reference" required>
+  SQL column containing the audio source — a local file path or URL, depending on the provider.
+</ParamField>
+
+<ParamField path="type" type="string" required>
+  Must be `'audio'` to identify this column as an audio input.
+</ParamField>
+
+<ParamField path="transcription_model" type="string" required>
+  Provider-specific transcription model to use. Required whenever `type` is `'audio'`. For OpenAI and Azure, use `'whisper-1'`.
+</ParamField>
+
+<ParamField path="name" type="string">
+  Optional alias for referencing the transcribed text in your prompt template, e.g., `{call}`.
+</ParamField>
+
+### Validation rules
+
+Flock enforces these rules at bind time:
+
+- If `type` is `'audio'`, `transcription_model` **must** be provided — omitting it raises an error.
+- If `transcription_model` is set but `type` is not `'audio'`, Flock raises an error.
+
+## Examples
+
+### Basic transcription
+
+Transcribe a list of audio files and return the raw transcripts:
+
+```sql
+SELECT
+    audio_id,
+    file_path,
+    llm_complete(
+        {'model_name': 'gpt-4o'},
+        {
+            'prompt': 'Transcribe the following audio file verbatim.',
+            'context_columns': [
+                {
+                    'data': file_path,
+                    'type': 'audio',
+                    'transcription_model': 'whisper-1'
+                }
+            ]
+        }
+    ) AS transcript
+FROM VALUES
+    (1, '/data/audio/meeting_01.mp3'),
+    (2, '/data/audio/meeting_02.mp3')
+AS t(audio_id, file_path);
+```
+
+### Chaining transcription and summarization
+
+Use a CTE to transcribe first, then pass the text to a second `llm_complete` call:
+
+```sql
+WITH raw_transcripts AS (
+    SELECT
+        audio_id,
+        llm_complete(
+            {'model_name': 'gpt-4o'},
+            {
+                'prompt': 'Transcribe the following audio file verbatim.',
+                'context_columns': [
+                    {
+                        'data': file_path,
+                        'type': 'audio',
+                        'transcription_model': 'whisper-1'
+                    }
+                ]
+            }
+        ) AS transcript
+    FROM VALUES
+        (1, '/data/audio/support_call_01.wav'),
+        (2, '/data/audio/support_call_02.wav')
+    AS t(audio_id, file_path)
+)
+SELECT
+    audio_id,
+    llm_complete(
+        {'model_name': 'gpt-4o'},
+        {
+            'prompt': 'Summarize this call in 3 bullet points.',
+            'context_columns': [
+                {'data': transcript, 'name': 'call'}
+            ]
+        }
+    ) AS call_summary
+FROM raw_transcripts;
+```
+
+### Filtering based on audio content
+
+Use `llm_filter` to keep only rows whose audio meets a semantic criterion:
+
+```sql
+-- Flag calls that mention cancellations
+SELECT
+    audio_id,
+    customer_id,
+    file_path
+FROM VALUES
+    (1, 101, '/data/audio/call_01.wav'),
+    (2, 102, '/data/audio/call_02.wav'),
+    (3, 103, '/data/audio/call_03.wav')
+AS t(audio_id, customer_id, file_path)
+WHERE llm_filter(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'Does this call mention cancelling a subscription? Answer true or false.',
+        'context_columns': [
+            {
+                'data': file_path,
+                'type': 'audio',
+                'transcription_model': 'whisper-1'
+            }
+        ]
+    }
+);
+```
+
+### Generating embeddings from audio
+
+There is no direct audio-to-embedding API in Flock. Use a two-step approach: transcribe the audio, then embed the resulting text with `llm_embedding`:
+
+<Steps>
+  <Step title="Transcribe audio to text">
+    Run `llm_complete` with `type: 'audio'` to produce a transcript column.
+  </Step>
+  <Step title="Embed the transcript">
+    Pass the transcript text to `llm_embedding` as a standard text column.
+  </Step>
+</Steps>
+
+```sql
+WITH transcripts AS (
+    SELECT
+        audio_id,
+        llm_complete(
+            {'model_name': 'gpt-4o'},
+            {
+                'prompt': 'Transcribe the following audio file.',
+                'context_columns': [
+                    {
+                        'data': file_path,
+                        'type': 'audio',
+                        'transcription_model': 'whisper-1'
+                    }
+                ]
+            }
+        ) AS transcript
+    FROM VALUES
+        (1, '/data/audio/note_01.m4a'),
+        (2, '/data/audio/note_02.m4a')
+    AS t(audio_id, file_path)
+),
+audio_embeddings AS (
+    SELECT
+        audio_id,
+        llm_embedding(
+            {'model_name': 'text-embedding-3-small'},
+            {
+                'context_columns': [
+                    {'data': transcript}
+                ]
+            }
+        ) AS embedding
+    FROM transcripts
+)
+SELECT * FROM audio_embeddings;
+```
+
+## Function support matrix
+
+| Function        | Audio support | Notes                                         |
+|-----------------|:-------------:|-----------------------------------------------|
+| `llm_complete`  | Full          | Transcribe and optionally transform content   |
+| `llm_filter`    | Full          | Filter rows based on audio-derived semantics  |
+| `llm_reduce`    | Full          | Summarize or aggregate transcripts            |
+| `llm_rerank`    | Via text      | Rerank based on transcript features           |
+| `llm_first`     | Via text      | Pick top row based on transcript criteria     |
+| `llm_last`      | Via text      | Pick bottom row based on transcript criteria  |
+| `llm_embedding` | Via text      | Embed transcripts, not raw audio              |
+
+For image-based workflows, see [Image support](/multimodal/image-support).

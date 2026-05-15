@@ -1,0 +1,405 @@
+---
+title: "LLM aggregate functions: reduce, rerank, first, last"
+description: "Reference for Flock's four LLM aggregate functions. Use them with GROUP BY to summarize, rerank, or select rows within a group using a language model."
+---
+
+Flock's aggregate functions work like any SQL aggregate — they process a group of rows defined by `GROUP BY` and return one result per group. The difference is that the "aggregation logic" is delegated to a language model: you supply a prompt describing what you want, and Flock batches the rows in the group and sends them to the model.
+
+All aggregate functions share the same two-argument signature as the scalar functions:
+
+1. A **model configuration** struct with `model_name` and an optional `secret_name`
+2. A **prompt configuration** struct with a `prompt` or `prompt_name`, an optional `version`, and a `context_columns` array
+
+The `context_columns` API is identical to the scalar functions:
+
+```sql
+{'data': column_ref}                        -- basic text column
+{'data': column_ref, 'name': 'alias'}       -- column with a named alias
+{'data': image_url_col, 'type': 'image'}    -- image column
+```
+
+---
+
+## llm_reduce
+
+`llm_reduce` collapses all rows in a group into a single text output. The model receives every row's column values and the prompt describing the aggregation — summarization, consolidation, opinion synthesis, and similar tasks.
+
+**Return type:** `JSON`
+
+### Parameters
+
+**Model configuration** (first argument)
+
+<ParamField body="model_name" type="string" required>
+  The registered model name to use for aggregation.
+</ParamField>
+
+<ParamField body="secret_name" type="string">
+  The DuckDB secret holding the API key for this model.
+</ParamField>
+
+**Prompt configuration** (second argument)
+
+<ParamField body="prompt" type="string">
+  An inline prompt instructing the model how to aggregate the rows. Mutually exclusive with `prompt_name`.
+</ParamField>
+
+<ParamField body="prompt_name" type="string">
+  The name of a pre-configured prompt in Flock's prompt registry. Mutually exclusive with `prompt`.
+</ParamField>
+
+<ParamField body="version" type="integer">
+  The version of the named prompt to use. Only valid with `prompt_name`.
+</ParamField>
+
+<ParamField body="context_columns" type="array" required>
+  Columns whose values are passed to the model for each row in the group.
+</ParamField>
+
+### Examples
+
+<CodeGroup>
+
+```sql Summarize without GROUP BY
+SELECT llm_reduce(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'Summarize the following product descriptions',
+        'context_columns': [{'data': product_description}]
+    }
+) AS product_summary
+FROM UNNEST([
+    'High-performance laptop with M2 chip and stunning Retina display',
+    'Wireless earbuds with active noise cancellation and spatial audio',
+    'Lightweight tablet perfect for creativity and productivity on the go'
+]) AS t(product_description);
+```
+
+```sql Summarize per category
+SELECT category,
+       llm_reduce(
+           {'model_name': 'gpt-4o'},
+           {
+               'prompt': 'Summarize the following product descriptions',
+               'context_columns': [{'data': product_description}]
+           }
+       ) AS summarized_product_info
+FROM VALUES
+    ('Electronics', 'High-performance laptop with M2 chip and stunning display'),
+    ('Electronics', 'Latest smartphone with advanced camera system and A17 Pro chip'),
+    ('Accessories', 'Wireless mouse with multi-touch surface and rechargeable battery'),
+    ('Accessories', 'Fast charging cable with USB-C connector and durable design')
+AS t(category, product_description)
+GROUP BY category;
+```
+
+```sql Named prompt with multiple columns
+SELECT category,
+       llm_reduce(
+           {'model_name': 'gpt-4o', 'secret_name': 'azure_key'},
+           {
+               'prompt_name': 'summarizer',
+               'version': 1,
+               'context_columns': [{'data': product_name}, {'data': product_description}]
+           }
+       ) AS detailed_summary
+FROM (VALUES
+    ('Electronics', 'MacBook Pro',   'High-performance laptop with M2 chip and stunning Retina display'),
+    ('Electronics', 'iPhone 15 Pro', 'Latest smartphone with titanium design and advanced camera system'),
+    ('Electronics', 'iPad Air',      'Lightweight tablet with M1 chip perfect for creativity and productivity')
+) AS t(category, product_name, product_description)
+GROUP BY category;
+```
+
+</CodeGroup>
+
+---
+
+## llm_rerank
+
+`llm_rerank` reorders the rows in a group by relevance to a query prompt and returns the full set of rows as a JSON array sorted from most to least relevant. It is built on the sliding-window listwise reranking method described by [Ma et al. (2023)](https://arxiv.org/abs/2305.02156), which handles groups larger than a model's context window by progressively ranking overlapping subsets.
+
+**Return type:** `JSON` (array of row objects, ordered by relevance)
+
+<Note>
+  `llm_rerank` returns all rows in the group as a JSON array. If you only need the single best or worst match, use `llm_first` or `llm_last` instead — they are more efficient for that case.
+</Note>
+
+### Sliding window mechanism
+
+When a group contains more rows than a model can rank in one call, `llm_rerank` uses a sliding window strategy:
+
+1. Rank the last `m` documents in a window.
+2. Shift the window toward the beginning of the list by `m/2`.
+3. Repeat until the window covers the start of the list.
+
+This ensures the most relevant documents bubble to the top quickly without requiring a single model call over the entire group.
+
+### Parameters
+
+**Model configuration** (first argument)
+
+<ParamField body="model_name" type="string" required>
+  The registered model name to use for reranking.
+</ParamField>
+
+<ParamField body="secret_name" type="string">
+  The DuckDB secret holding the API key for this model.
+</ParamField>
+
+**Prompt configuration** (second argument)
+
+<ParamField body="prompt" type="string">
+  The query or relevance criterion to rank against. Mutually exclusive with `prompt_name`.
+</ParamField>
+
+<ParamField body="prompt_name" type="string">
+  The name of a pre-configured ranking prompt. Mutually exclusive with `prompt`.
+</ParamField>
+
+<ParamField body="version" type="integer">
+  The version of the named prompt to use. Only valid with `prompt_name`.
+</ParamField>
+
+<ParamField body="context_columns" type="array" required>
+  Columns whose values the model uses to assess relevance for each row.
+</ParamField>
+
+### Examples
+
+<CodeGroup>
+
+```sql Rerank a flat list
+SELECT llm_rerank(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'AI and machine learning innovations',
+        'context_columns': [{'data': document_title}, {'data': document_content}]
+    }
+) AS reranked_documents
+FROM VALUES
+    ('Introduction to AI',           'This document covers the basics of artificial intelligence and its applications'),
+    ('Machine Learning Fundamentals','Comprehensive guide to machine learning algorithms and techniques'),
+    ('Advanced Neural Networks',     'Deep dive into neural network architectures and optimization'),
+    ('Data Science Overview',        'General overview of data science methodologies and tools')
+AS t(document_title, document_content);
+```
+
+```sql Rerank within each category
+SELECT category,
+       llm_rerank(
+           {'model_name': 'gpt-4o'},
+           {
+               'prompt': 'emerging technology trends',
+               'context_columns': [{'data': document_title}, {'data': document_content}]
+           }
+       ) AS reranked_documents
+FROM VALUES
+    ('AI',         'Machine Learning Basics',  'Introduction to supervised and unsupervised learning'),
+    ('AI',         'Deep Learning Guide',      'Advanced neural networks and deep learning techniques'),
+    ('AI',         'Computer Vision',          'Image processing and computer vision applications'),
+    ('Blockchain', 'Cryptocurrency Overview',  'Understanding Bitcoin and blockchain technology'),
+    ('Blockchain', 'Smart Contracts',          'Ethereum smart contracts and decentralized applications'),
+    ('IoT',        'IoT Fundamentals',         'Internet of Things devices and connectivity')
+AS documents(category, document_title, document_content)
+GROUP BY category;
+```
+
+</CodeGroup>
+
+### Output format
+
+`llm_rerank` returns a JSON array of objects. Each object mirrors the columns provided in `context_columns`, ordered from most to least relevant:
+
+```json
+[
+  {
+    "document_title": "Advanced Neural Networks",
+    "document_content": "Deep dive into neural network architectures and optimization"
+  },
+  {
+    "document_title": "Introduction to AI",
+    "document_content": "This document covers the basics of artificial intelligence and its applications"
+  }
+]
+```
+
+---
+
+## llm_first
+
+`llm_first` reranks the rows in a group by relevance to a prompt and returns only the **most relevant** row as a JSON object. It is equivalent to running `llm_rerank` and taking the first element, but avoids materializing the full ranked list.
+
+**Return type:** `JSON` (single row object)
+
+### Parameters
+
+**Model configuration** (first argument)
+
+<ParamField body="model_name" type="string" required>
+  The registered model name to use for selection.
+</ParamField>
+
+<ParamField body="secret_name" type="string">
+  The DuckDB secret holding the API key for this model.
+</ParamField>
+
+**Prompt configuration** (second argument)
+
+<ParamField body="prompt" type="string">
+  The relevance criterion. The model selects the row that best matches this prompt. Mutually exclusive with `prompt_name`.
+</ParamField>
+
+<ParamField body="prompt_name" type="string">
+  The name of a pre-configured selection prompt. Mutually exclusive with `prompt`.
+</ParamField>
+
+<ParamField body="version" type="integer">
+  The version of the named prompt to use. Only valid with `prompt_name`.
+</ParamField>
+
+<ParamField body="context_columns" type="array" required>
+  Columns the model uses to assess relevance.
+</ParamField>
+
+### Examples
+
+<CodeGroup>
+
+```sql Most relevant product across all rows
+SELECT llm_first(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'high-performance computing',
+        'context_columns': [{'data': product_name}, {'data': product_description}]
+    }
+) AS first_product_feature
+FROM VALUES
+    ('MacBook Pro', 'High-performance laptop with M2 chip and Retina display'),
+    ('AirPods Pro', 'Wireless earbuds with active noise cancellation'),
+    ('iPad Air',    'Lightweight tablet perfect for creativity and productivity')
+AS t(product_name, product_description);
+```
+
+```sql Most relevant product per category
+SELECT category,
+       llm_first(
+           {'model_name': 'gpt-4o'},
+           {
+               'prompt': 'premium audio quality',
+               'context_columns': [{'data': product_name}, {'data': product_description}]
+           }
+       ) AS first_product_feature
+FROM VALUES
+    ('Electronics', 'Premium Headphones',  'High-quality wireless headphones with superior sound',  89.99),
+    ('Electronics', 'Gaming Mouse',        'Precision gaming mouse with RGB lighting',              45.99),
+    ('Electronics', 'Wireless Keyboard',   'Ergonomic wireless keyboard with backlight',            79.99),
+    ('Books',       'Python Programming',  'Complete guide to Python programming language',         39.99),
+    ('Books',       'Data Science Guide',  'Comprehensive data science methodology book',           49.99),
+    ('Books',       'Machine Learning',    'Introduction to machine learning algorithms',           59.99)
+AS products(category, product_name, product_description, price)
+GROUP BY category;
+```
+
+</CodeGroup>
+
+### Output format
+
+`llm_first` returns a single JSON object containing the column values of the most relevant row:
+
+```json
+{
+  "product_name": "Wireless Headphones",
+  "product_description": "High-quality wireless headphones with noise cancellation."
+}
+```
+
+---
+
+## llm_last
+
+`llm_last` is the complement of `llm_first` — it reranks the rows in a group by relevance to a prompt and returns the **least relevant** row. Use it to identify outliers, flag low-quality entries, or find the weakest match in a group.
+
+**Return type:** `JSON` (single row object)
+
+### Parameters
+
+**Model configuration** (first argument)
+
+<ParamField body="model_name" type="string" required>
+  The registered model name to use for selection.
+</ParamField>
+
+<ParamField body="secret_name" type="string">
+  The DuckDB secret holding the API key for this model.
+</ParamField>
+
+**Prompt configuration** (second argument)
+
+<ParamField body="prompt" type="string">
+  The relevance criterion. The model selects the row that least matches this prompt. Mutually exclusive with `prompt_name`.
+</ParamField>
+
+<ParamField body="prompt_name" type="string">
+  The name of a pre-configured selection prompt. Mutually exclusive with `prompt`.
+</ParamField>
+
+<ParamField body="version" type="integer">
+  The version of the named prompt to use. Only valid with `prompt_name`.
+</ParamField>
+
+<ParamField body="context_columns" type="array" required>
+  Columns the model uses to assess relevance.
+</ParamField>
+
+### Examples
+
+<CodeGroup>
+
+```sql Least relevant product across all rows
+SELECT llm_last(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'professional work productivity',
+        'context_columns': [{'data': product_name}, {'data': product_description}]
+    }
+) AS last_product_feature
+FROM VALUES
+    ('MacBook Pro', 'High-performance laptop with M2 chip and Retina display'),
+    ('AirPods Pro', 'Wireless earbuds with active noise cancellation'),
+    ('iPad Air',    'Lightweight tablet perfect for creativity and productivity')
+AS t(product_name, product_description);
+```
+
+```sql Least relevant product per category
+SELECT category,
+       llm_last(
+           {'model_name': 'gpt-4o'},
+           {
+               'prompt': 'high-quality audio equipment for entertainment',
+               'context_columns': [{'data': product_name}, {'data': product_description}]
+           }
+       ) AS last_product_feature
+FROM VALUES
+    ('Electronics', 'Premium Headphones',  'High-quality wireless headphones with superior sound',  89.99),
+    ('Electronics', 'Gaming Mouse',        'Precision gaming mouse with RGB lighting',              45.99),
+    ('Electronics', 'Wireless Keyboard',   'Ergonomic wireless keyboard with backlight',            79.99),
+    ('Books',       'Python Programming',  'Complete guide to Python programming language',         39.99),
+    ('Books',       'Data Science Guide',  'Comprehensive data science methodology book',           49.99),
+    ('Books',       'Machine Learning',    'Introduction to machine learning algorithms',           59.99)
+AS products(category, product_name, product_description, price)
+GROUP BY category;
+```
+
+</CodeGroup>
+
+### Output format
+
+`llm_last` returns a single JSON object containing the column values of the least relevant row:
+
+```json
+{
+  "product_name": "Wireless Keyboard",
+  "product_description": "Ergonomic wireless keyboard with backlight."
+}
+```

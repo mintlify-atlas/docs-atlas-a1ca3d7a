@@ -1,0 +1,315 @@
+---
+title: "Analyze images in DuckDB SQL queries with Flock"
+description: "Analyze, filter, and embed images directly in DuckDB SQL. Pass image URLs or base64 data to any Flock LLM function using context_columns with type: 'image'."
+---
+
+Flock treats images as first-class inputs in SQL queries. You can describe product photos, filter records by visual criteria, combine image and text columns in a single prompt, and feed generated captions into `llm_embedding` for similarity search — all without leaving your SQL workflow.
+
+## Supported image formats
+
+Flock accepts images in the following formats:
+
+- **JPEG** (.jpg, .jpeg)
+- **PNG** (.png)
+- **GIF** (.gif)
+- **WebP** (.webp)
+- **BMP** (.bmp)
+
+## Provider support
+
+How you supply image data depends on your provider:
+
+<Tabs>
+  <Tab title="OpenAI">
+    OpenAI vision models (e.g., `gpt-4o`) accept:
+    - **HTTP/HTTPS URLs** pointing to publicly accessible images
+    - **Base64-encoded strings** for inline image data
+  </Tab>
+  <Tab title="Ollama">
+    Ollama vision models (e.g., `llava`) accept:
+    - **Base64-encoded strings** only — URLs are not supported
+  </Tab>
+  <Tab title="Anthropic">
+    Anthropic Claude models support image inputs. Refer to the [Anthropic getting-started guide](/getting-started/anthropic) for configuration details.
+  </Tab>
+</Tabs>
+
+## Using images in context_columns
+
+To pass image data to a Flock function, add an entry with `type: 'image'` to the `context_columns` array:
+
+```sql
+'context_columns': [
+  {'data': image_url, 'type': 'image'}
+]
+```
+
+### Image context column properties
+
+<ParamField path="data" type="column reference" required>
+  SQL column containing the image source — an HTTP/HTTPS URL (OpenAI) or a base64-encoded string (OpenAI, Ollama).
+</ParamField>
+
+<ParamField path="type" type="string" required>
+  Must be `'image'` to identify this column as an image input. Defaults to `'tabular'` when omitted.
+</ParamField>
+
+<ParamField path="name" type="string">
+  Optional alias to reference this image in your prompt template, e.g., `{product_photo}`.
+</ParamField>
+
+<ParamField path="detail" type="string">
+  OpenAI only. Controls how much token budget the model uses when processing the image.
+
+  - `'low'` (default) — fewer tokens, faster, lower cost
+  - `'medium'` — balanced token usage
+  - `'high'` — maximum detail, more tokens, higher cost
+
+  Ignored by Ollama and Anthropic.
+</ParamField>
+
+## Examples
+
+### Describing images with llm_complete
+
+Generate a description for each row in a product catalog:
+
+```sql
+SELECT
+    product_name,
+    llm_complete(
+        {'model_name': 'gpt-4o'},
+        {
+            'prompt': 'Describe this product image in detail.',
+            'context_columns': [
+                {'data': image_url, 'type': 'image'}
+            ]
+        }
+    ) AS image_description
+FROM VALUES
+    ('Wireless Headphones', 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=400'),
+    ('Gaming Laptop',       'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400'),
+    ('Smart Watch',         'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400')
+AS t(product_name, image_url);
+```
+
+You can mix image and text columns in the same `context_columns` list:
+
+```sql
+SELECT
+    product_name,
+    category,
+    llm_complete(
+        {'model_name': 'gpt-4o'},
+        {
+            'prompt': 'Based on this {category} product image and its name {product}, write a marketing description.',
+            'context_columns': [
+                {'data': product_name, 'name': 'product'},
+                {'data': category,     'name': 'category'},
+                {'data': image_url,    'type': 'image'}
+            ]
+        }
+    ) AS marketing_copy
+FROM VALUES
+    ('Wireless Headphones', 'Electronics', 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=400'),
+    ('Coffee Mug',          'Kitchen',     'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=400'),
+    ('Running Shoes',       'Sports',      'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=400')
+AS t(product_name, category, image_url);
+```
+
+### Filtering with llm_filter
+
+Keep only rows whose images meet a visual criterion:
+
+```sql
+SELECT *
+FROM VALUES
+    (1, 'Mountain Landscape', 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=400'),
+    (2, 'City Street',        'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=400'),
+    (3, 'Beach Sunset',       'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=400')
+AS t(photo_id, photo_title, photo_url)
+WHERE llm_filter(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'Is this an outdoor landscape photograph?',
+        'context_columns': [
+            {'data': photo_url, 'type': 'image'}
+        ]
+    }
+);
+```
+
+You can combine `llm_filter` with standard SQL predicates:
+
+```sql
+SELECT product_id, product_name, image_url, price
+FROM VALUES
+    (1, 'Premium Headphones', 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=400', 150.00),
+    (2, 'Gaming Mouse',       'https://images.unsplash.com/photo-1527814050087-3793815479db?w=400',  75.00),
+    (3, 'Wireless Keyboard',  'https://images.unsplash.com/photo-1587829741301-dc798b83add3?w=400', 120.00),
+    (4, 'Studio Monitor',     'https://images.unsplash.com/photo-1545127398-14699f92334b?w=400',   200.00)
+AS t(product_id, product_name, image_url, price)
+WHERE llm_filter(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'Is this a high-quality, professional product photo with good lighting and composition?',
+        'context_columns': [
+            {'data': image_url,    'type': 'image'},
+            {'data': product_name}
+        ]
+    }
+)
+AND price > 100;
+```
+
+### Picking the best image with llm_first
+
+Use `llm_first` with `GROUP BY` to select the most appealing image per category:
+
+```sql
+SELECT
+    category,
+    llm_first(
+        {'model_name': 'gpt-4o'},
+        {
+            'prompt': 'Which product has the most appealing and professional product image?',
+            'context_columns': [
+                {'data': product_name},
+                {'data': image_url,      'type': 'image'},
+                {'data': price::VARCHAR}
+            ]
+        }
+    ) AS best_product_image
+FROM VALUES
+    ('Electronics', 'Wireless Headphones', 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=400', 89.99),
+    ('Electronics', 'Gaming Mouse',        'https://images.unsplash.com/photo-1527814050087-3793815479db?w=400', 45.99),
+    ('Electronics', 'Wireless Keyboard',   'https://images.unsplash.com/photo-1587829741301-dc798b83add3?w=400', 79.99),
+    ('Kitchen',     'Coffee Maker',        'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=400', 129.99),
+    ('Kitchen',     'Blender',             'https://images.unsplash.com/photo-1570197788417-0e82375c9371?w=400',  99.99)
+AS t(category, product_name, image_url, price)
+GROUP BY category;
+```
+
+### Image descriptions → embeddings workflow
+
+`llm_embedding` accepts only text, so use a two-step CTE to first generate captions, then embed them for similarity search:
+
+```sql
+WITH image_descriptions AS (
+    SELECT
+        image_id,
+        filename,
+        image_url,
+        llm_complete(
+            {'model_name': 'gpt-4o'},
+            {
+                'prompt': 'Provide a detailed description of this image, including objects, colors, composition, mood, and any text visible.',
+                'context_columns': [
+                    {'data': image_url, 'type': 'image'}
+                ]
+            }
+        ) AS generated_description
+    FROM VALUES
+        (1, 'sunset_beach.jpg',  'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=400'),
+        (2, 'city_skyline.jpg',  'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=400'),
+        (3, 'forest_path.jpg',   'https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=400')
+    AS t(image_id, filename, image_url)
+),
+image_embeddings AS (
+    SELECT
+        image_id,
+        filename,
+        image_url,
+        generated_description,
+        llm_embedding(
+            {'model_name': 'text-embedding-3-small'},
+            {
+                'context_columns': [
+                    {'data': generated_description}
+                ]
+            }
+        ) AS description_embedding
+    FROM image_descriptions
+)
+SELECT * FROM image_embeddings;
+```
+
+<Note>
+  `llm_embedding` does not accept image inputs directly. The two-step pattern above — generate a description with `llm_complete`, then embed the text — is the recommended approach for image similarity search.
+</Note>
+
+## Function support matrix
+
+| Function        | Image support | Notes                                        |
+|-----------------|:-------------:|----------------------------------------------|
+| `llm_complete`  | Full          | Generate text from image content             |
+| `llm_filter`    | Full          | Filter rows on visual criteria               |
+| `llm_reduce`    | Full          | Aggregate across image collections           |
+| `llm_rerank`    | Full          | Rank items by visual relevance               |
+| `llm_first`     | Full          | Select top item by visual criteria           |
+| `llm_last`      | Full          | Select bottom item by visual criteria        |
+| `llm_embedding` | Text only     | Embed descriptions generated from images     |
+
+## Performance tips
+
+### Batch processing
+
+Set `batch_size` in the model struct to process multiple images per API call and reduce overhead:
+
+```sql
+SELECT
+    image_id,
+    llm_complete(
+        {
+            'model_name': 'gpt-4o',
+            'batch_size': 5
+        },
+        {
+            'prompt': 'Describe this image briefly.',
+            'context_columns': [
+                {'data': image_url, 'type': 'image'}
+            ]
+        }
+    ) AS description
+FROM VALUES
+    (1, 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=400'),
+    (2, 'https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=400'),
+    (3, 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=400'),
+    (4, 'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=400'),
+    (5, 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=400')
+AS t(image_id, image_url);
+```
+
+### Choosing the right detail level (OpenAI)
+
+<Tip>
+  Use `detail: 'low'` (the default) for classification and coarse analysis — it is significantly faster and cheaper. Reserve `detail: 'high'` for tasks that genuinely require fine-grained inspection, such as reading small text in images or quality-control audits.
+</Tip>
+
+```sql
+-- Fast, cost-effective classification
+SELECT llm_complete(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'What type of product is this?',
+        'context_columns': [
+            {'data': image_url, 'type': 'image'}   -- 'low' detail by default
+        ]
+    }
+) AS product_type
+FROM product_images;
+
+-- High-accuracy quality inspection
+SELECT llm_complete(
+    {'model_name': 'gpt-4o'},
+    {
+        'prompt': 'Perform detailed quality control analysis of this product image.',
+        'context_columns': [
+            {'data': image_url, 'type': 'image', 'detail': 'high'}
+        ]
+    }
+) AS quality_analysis
+FROM critical_product_images;
+```
+
+For audio transcription workflows, see [Audio support](/multimodal/audio-support).

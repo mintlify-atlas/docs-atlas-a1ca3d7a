@@ -1,0 +1,117 @@
+---
+title: "Configure Flock with Azure OpenAI deployments"
+description: "Set up Azure OpenAI credentials in DuckDB using CREATE SECRET, register a model with your deployment name, and run LLM queries via Flock."
+---
+
+Flock supports Azure OpenAI as a dedicated provider. You connect Flock to your Azure deployment by storing your API key, resource name, and API version as a DuckDB secret, then registering a model that maps to a specific deployment. All standard Flock functions work identically once the provider is configured.
+
+## Prerequisites
+
+You need the following from your Azure OpenAI resource:
+
+- **API key** — found under **Keys and Endpoint** in the Azure portal
+- **Resource name** — the subdomain of your endpoint (for example, `my-resource` if your endpoint is `https://my-resource.openai.azure.com`)
+- **API version** — the Azure OpenAI REST API version string (for example, `2024-02-01`)
+- **Deployment name** — the name you gave to the model deployment in Azure AI Studio
+
+For the full Azure OpenAI reference, see the [Microsoft Azure documentation](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference).
+
+Make sure Flock is installed and loaded before continuing — see the [Quickstart](/quickstart) if you haven't done that yet.
+
+## Configure your secret
+
+Store your Azure credentials using `CREATE SECRET` with the `azure_llm` type:
+
+```sql
+CREATE SECRET (
+    TYPE azure_llm,
+    API_KEY 'your-api-key',
+    RESOURCE_NAME 'your-resource-name',
+    API_VERSION 'your-api-version'
+);
+```
+
+All three fields are required. Flock reconstructs the endpoint URL as `https://{RESOURCE_NAME}.openai.azure.com` internally.
+
+<Warning>
+  `RESOURCE_NAME` is just the subdomain, not the full URL. If your Azure endpoint is `https://my-resource.openai.azure.com`, set `RESOURCE_NAME` to `my-resource`.
+</Warning>
+
+## Create a model
+
+Register a named model pointing to your Azure deployment. The second argument is your **deployment name** as configured in Azure AI Studio:
+
+```sql
+CREATE MODEL(
+    'QuackingModel',
+    'gpt-4o',
+    'azure',
+    {"tuple_format": "json", "batch_size": 32, "model_parameters": {"temperature": 0.7}}
+);
+```
+
+The four arguments are:
+
+| Argument | Description |
+|---|---|
+| `'QuackingModel'` | Unique name you reference in queries |
+| `'gpt-4o'` | Azure deployment name |
+| `'azure'` | Provider name |
+| `{...}` | Config: batch size, tuple format, and model parameters |
+
+## Run a query
+
+With your secret and model in place, call `llm_complete`:
+
+```sql
+SELECT llm_complete(
+    {'model_name': 'QuackingModel'},
+    {'prompt': 'Write a short poem about a database.'}
+);
+```
+
+To use column data as context:
+
+```sql
+SELECT llm_complete(
+    {'model_name': 'QuackingModel'},
+    {
+        'prompt': 'Summarize this document in one paragraph: {doc}',
+        'context_columns': [{'data': document_text, 'name': 'doc'}]
+    }
+) AS summary
+FROM documents;
+```
+
+## Azure-specific configuration details
+
+<AccordionGroup>
+  <Accordion title="Endpoint reconstruction">
+    Flock builds the Azure endpoint from `RESOURCE_NAME` automatically:
+
+    ```
+    https://{RESOURCE_NAME}.openai.azure.com
+    ```
+
+    You do not need to supply the full URL — only the resource name subdomain.
+  </Accordion>
+
+  <Accordion title="API version">
+    Azure OpenAI requires an explicit API version with every request. Pass it as `API_VERSION` when creating your secret. Common values include `2024-02-01` and `2024-05-01-preview`. Check the [Azure OpenAI API reference](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference) for the current stable version.
+  </Accordion>
+
+  <Accordion title="Deployment name vs. model ID">
+    In Azure, you deploy a base model (such as `gpt-4o`) under a custom deployment name you choose. The second argument to `CREATE MODEL` should be your **deployment name**, not necessarily the underlying model ID — they may differ depending on how you named your deployment.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Structured output" icon="brackets-curly" href="/advanced/structured-output">
+    Enforce JSON schemas on llm_complete responses
+  </Card>
+  <Card title="Scalar functions" icon="function" href="/functions/scalar-functions">
+    Full reference for llm_complete, llm_filter, llm_embedding, and more
+  </Card>
+</CardGroup>

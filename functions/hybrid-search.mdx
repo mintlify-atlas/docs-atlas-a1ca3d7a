@@ -1,0 +1,284 @@
+---
+title: "Hybrid search and fusion scoring functions"
+description: "Reference for Flock's fusion functions: combine BM25 and vector scores using rank-based RRF or score-based CombSUM, CombMNZ, CombMED, and CombANZ."
+---
+
+Hybrid search combines multiple retrieval signals — typically a keyword score like BM25 and a semantic score from vector embeddings — into a single relevance score. Neither signal alone is best in all cases: BM25 is strong for exact keyword matches while vector similarity captures semantic closeness. Fusing the two tends to outperform either in isolation.
+
+Flock provides five scalar fusion functions for this purpose. They fall into two categories:
+
+- **Rank-based** (`fusion_rrf`): takes a rank position (1 = best) from each retrieval system
+- **Score-based** (`fusion_combsum`, `fusion_combmnz`, `fusion_combmed`, `fusion_combanz`): takes a normalized score (0.0–1.0) from each retrieval system
+
+All fusion functions accept **two or more numeric inputs** — one per retrieval system — and return a single `DOUBLE` score per row. A higher combined score means a more relevant document.
+
+---
+
+## Data preprocessing
+
+Before calling a fusion function, you need to prepare your scores in the right format.
+
+### Ranks for fusion_rrf
+
+Obtain integer ranks using `DENSE_RANK()`. Documents with the same score get the same rank. Rank `1` is the best-ranked document.
+
+```sql
+SELECT
+    doc_id,
+    bm25_score,
+    DENSE_RANK() OVER (ORDER BY bm25_score DESC) AS bm25_rank
+FROM bm25_scores;
+```
+
+### Normalized scores for score-based functions
+
+Score-based functions require scores on a common scale. Min-max normalization maps each system's scores to [0, 1]. When all scores are identical (min = max), the formula produces `NaN`, which the fusion functions treat as `0`.
+
+```sql
+WITH min_max AS (
+    SELECT
+        MIN(bm25_score) AS min_score,
+        MAX(bm25_score) AS max_score
+    FROM bm25_scores
+)
+SELECT
+    doc_id,
+    bm25_score,
+    (bm25_score - min_score) / (max_score - min_score) AS normalized_bm25
+FROM bm25_scores, min_max;
+```
+
+<Warning>
+  NULL, NaN, and `0` are all treated as `0` by every score-based fusion function. A zero score signals that the document was not found (or ranked last) by that retrieval system — it is not ignored.
+</Warning>
+
+---
+
+## fusion_rrf
+
+Reciprocal Rank Fusion (RRF), as introduced by [Cormack et al. (2009)](https://doi.org/10.1145/1571941.1572114). Each document's combined score is the sum of reciprocal ranks across all retrieval systems:
+
+```
+combined_score = SUM over each system: 1 / (60 + rank_n)
+```
+
+The constant `60` dampens the impact of rank differences for high-ranked documents. A document ranked 1st contributes `1/61 ≈ 0.0164` and a document ranked 100th contributes `1/160 ≈ 0.0063`.
+
+**Return type:** `DOUBLE`
+
+**Parameters:** Two or more `INTEGER` rank values, one per retrieval system.
+
+### Examples
+
+<CodeGroup>
+
+```sql Simple two-system fusion
+-- Both systems rank this document 1st
+SELECT fusion_rrf(1, 1);
+-- Result: 0.03278688524590164
+```
+
+```sql Combining BM25 rank and embedding rank
+SELECT
+    fusion_rrf(bm25_rank, embedding_rank) AS combined_score
+FROM search_results;
+```
+
+```sql Full pipeline with DENSE_RANK
+WITH ranked AS (
+    SELECT
+        doc_id,
+        document_text,
+        DENSE_RANK() OVER (ORDER BY bm25_score     DESC) AS bm25_rank,
+        DENSE_RANK() OVER (ORDER BY embedding_score DESC) AS embedding_rank
+    FROM search_results
+)
+SELECT
+    doc_id,
+    document_text,
+    fusion_rrf(bm25_rank, embedding_rank) AS combined_score
+FROM ranked
+ORDER BY combined_score DESC;
+```
+
+</CodeGroup>
+
+---
+
+## fusion_combsum
+
+Sums normalized scores across all retrieval systems.
+
+```
+combined_score = SUM over each system: normalized_score_n
+```
+
+**Return type:** `DOUBLE`
+
+**Parameters:** Two or more `DOUBLE` normalized scores (0.0–1.0), one per retrieval system.
+
+### Example
+
+```sql
+SELECT
+    fusion_combsum(bm25_normalized, embedding_normalized) AS combined_score
+FROM search_results
+ORDER BY combined_score DESC;
+```
+
+---
+
+## fusion_combmnz
+
+Extends CombSUM by multiplying the sum by the number of retrieval systems that returned a non-zero score for the document (the "hit count"). Documents found by more systems receive a boost.
+
+```
+combined_score = hit_count * SUM over each system: normalized_score_n
+```
+
+A "hit" is any score strictly greater than `0`. NULL, NaN, and `0` do not count as hits.
+
+**Return type:** `DOUBLE`
+
+**Parameters:** Two or more `DOUBLE` normalized scores (0.0–1.0), one per retrieval system.
+
+### Example
+
+```sql
+SELECT
+    fusion_combmnz(bm25_normalized, embedding_normalized) AS combined_score
+FROM search_results
+ORDER BY combined_score DESC;
+```
+
+---
+
+## fusion_combmed
+
+Takes the median normalized score across all retrieval systems. NULL and NaN are treated as `0` and **are included** when calculating the median — a document missing from one system is penalized.
+
+```
+combined_score = median(normalized_score_1, normalized_score_2, ..., normalized_score_N)
+```
+
+For example, inputs of `(NULL, NULL, 1.0)` yield a median of `0.0`.
+
+**Return type:** `DOUBLE`
+
+**Parameters:** Two or more `DOUBLE` normalized scores, one per retrieval system.
+
+### Example
+
+```sql
+SELECT
+    fusion_combmed(bm25_normalized, embedding_normalized) AS combined_score
+FROM search_results
+ORDER BY combined_score DESC;
+```
+
+---
+
+## fusion_combanz
+
+Calculates the average (arithmetic mean) normalized score across all retrieval systems. NULL and NaN are treated as `0` and are included in the denominator, so a document missing from some systems is penalized.
+
+```
+combined_score = (SUM of normalized_score_n) / N
+```
+
+For example, inputs of `(NULL, NULL, 1.0)` across three systems yield `0.333...`.
+
+**Return type:** `DOUBLE`
+
+**Parameters:** Two or more `DOUBLE` normalized scores, one per retrieval system.
+
+### Example
+
+```sql
+SELECT
+    fusion_combanz(bm25_normalized, embedding_normalized) AS combined_score
+FROM search_results
+ORDER BY combined_score DESC;
+```
+
+---
+
+## End-to-end RAG pipeline example
+
+The following query shows a complete hybrid search pipeline: generate embeddings with `llm_embedding`, compute BM25 ranks and embedding similarity scores, normalize both signals, fuse them with `fusion_rrf`, then return the top results for retrieval-augmented generation.
+
+<Steps>
+  <Step title="Create a document table with embeddings">
+    ```sql
+    CREATE TABLE documents AS
+    SELECT
+        doc_id,
+        document_text,
+        llm_embedding(
+            {'model_name': 'text-embedding-3-small'},
+            {'context_columns': [{'data': document_text}]}
+        ) AS embedding
+    FROM raw_documents;
+    ```
+  </Step>
+
+  <Step title="Run BM25 and vector search, collect scores">
+    ```sql
+    CREATE TABLE search_results AS
+    WITH query_embedding AS (
+        SELECT llm_embedding(
+            {'model_name': 'text-embedding-3-small'},
+            {'context_columns': [{'data': query}]}
+        ) AS qvec
+        FROM (VALUES ('What are the best noise-cancelling headphones?')) AS t(query)
+    ),
+    vector_scores AS (
+        SELECT
+            d.doc_id,
+            d.document_text,
+            array_cosine_similarity(
+                d.embedding::DOUBLE[1536],
+                q.qvec::DOUBLE[1536]
+            ) AS embedding_score
+        FROM documents d, query_embedding q
+    ),
+    bm25_scores AS (
+        -- Replace with your BM25 implementation or full-text search query
+        SELECT doc_id, bm25_score
+        FROM fts_index
+        WHERE query = 'noise-cancelling headphones'
+    )
+    SELECT
+        v.doc_id,
+        v.document_text,
+        v.embedding_score,
+        COALESCE(b.bm25_score, 0) AS bm25_score
+    FROM vector_scores v
+    LEFT JOIN bm25_scores b USING (doc_id);
+    ```
+  </Step>
+
+  <Step title="Compute ranks and fuse scores">
+    ```sql
+    WITH ranked AS (
+        SELECT
+            doc_id,
+            document_text,
+            DENSE_RANK() OVER (ORDER BY bm25_score     DESC) AS bm25_rank,
+            DENSE_RANK() OVER (ORDER BY embedding_score DESC) AS embedding_rank
+        FROM search_results
+    )
+    SELECT
+        doc_id,
+        document_text,
+        fusion_rrf(bm25_rank, embedding_rank) AS combined_score
+    FROM ranked
+    ORDER BY combined_score DESC
+    LIMIT 5;
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  Use `fusion_rrf` when your retrieval systems use different score scales and you want a robust, parameter-free fusion. Switch to a score-based function like `fusion_combmnz` when you have already normalized your scores and want documents present in multiple systems to receive a boost.
+</Tip>
